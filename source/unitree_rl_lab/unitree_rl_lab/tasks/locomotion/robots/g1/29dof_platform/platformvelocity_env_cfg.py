@@ -328,14 +328,18 @@ class RewardsCfg:
         params={"command_name": "base_velocity", "std": math.sqrt(0.25)},
     )# 这里设置 track_lin_vel_xy 的 func 为 mdp.track_lin_vel_xy_yaw_frame_exp，表示使用基于机器人朝向的线速度跟踪奖励函数，以提供更准确的速度跟踪信号，帮助训练更好地适应平台运动的挑战；weight 设置为 1.0，表示这个奖励项在总奖励中的权重较高，以强调任务目标的重要性；params 中的 command_name 设置为 "base_velocity"，表示这个奖励项将跟踪 base_velocity 命令；std 设置为 sqrt(0.25)，表示奖励函数中的误差将被缩放为原来的 0.5，以提供适度的奖励信号，帮助训练更好地适应平台运动的挑战；如果需要更强或更弱的奖励信号，可以调整 weight 和 std。
     track_ang_vel_z = RewTerm(
-        func=mdp.track_ang_vel_z_exp, weight=0.5, params={"command_name": "base_velocity", "std": math.sqrt(0.25)}
+        func=mdp.track_ang_vel_z_exp, weight=1.0, params={"command_name": "base_velocity", "std": math.sqrt(0.25)}
     ) # 这里设置 track_ang_vel_z 的 func 为 mdp.track_ang_vel_z_exp，表示使用基于机器人朝向的角速度跟踪奖励函数，以提供更准确的角速度跟踪信号，帮助训练更好地适应平台运动的挑战；weight 设置为 0.5，表示这个奖励项在总奖励中的权重较高，但不如线速度跟踪重要，以强调任务目标的重要性；params 中的 command_name 设置为 "base_velocity"，表示这个奖励项将跟踪 base_velocity 命令；std 设置为 sqrt(0.25)，表示奖励函数中的误差将被缩放为原来的 0.5，以提供适度的奖励信号，帮助训练更好地适应平台运动的挑战；如果需要更强或更弱的奖励信号，可以调整 weight 和 std。
 
     alive = RewTerm(func=mdp.is_alive, weight=0.2)# 这里设置 alive 的 func 为 mdp.is_alive，表示使用一个简单的存活奖励函数，提供一个二元奖励信号，帮助训练保持机器人在平台上；weight 设置为 0.2，表示这个奖励项在总奖励中的权重较低，但仍然重要，以鼓励机器人保持存活状态；如果需要更强或更弱的存活激励，可以调整 weight。
 
     # -- base
-    base_linear_velocity = RewTerm(func=mdp.lin_vel_z_l2, weight=-0.2) # 机器人基座线速度奖励，使用基于 z 轴线速度的 L2 奖励函数，以提供一个关于机器人垂直运动的奖励信号，帮助训练更好地适应平台运动的挑战；weight 设置为 -2.0，表示这个奖励项在总奖励中的权重较高，并且是一个惩罚项，以鼓励机器人保持较低的垂直速度；如果需要更强或更弱的惩罚信号，可以调整 weight。
-    base_angular_velocity = RewTerm(func=mdp.ang_vel_xy_l2, weight=-0.01) # 机器人基座角速度奖励，使用基于 x 和 y 轴角速度的 L2 奖励函数，以提供一个关于机器人旋转运动的奖励信号，帮助训练更好地适应平台运动的挑战；weight 设置为 -0.05，表示这个奖励项在总奖励中的权重较低，并且是一个惩罚项，以鼓励机器人保持较低的旋转速度；如果需要更强或更弱的惩罚信号，可以调整 weight。
+    base_linear_velocity = RewTerm(
+        func=mdp.base_lin_vel_z_rel_platform_l2, weight=-0.2
+    ) # 机器人基座线速度奖励（相对平台 z 速度），避免将平台垂向运动误判为机器人错误。
+    base_angular_velocity = RewTerm(
+        func=mdp.base_ang_vel_xy_rel_platform_l2, weight=-0.02
+    ) # 机器人基座角速度奖励（相对平台 roll/pitch 角速度），减少平台旋转带来的误罚。
     joint_vel = RewTerm(func=mdp.joint_vel_l2, weight=-0.001) # 机器人关节速度奖励，使用基于关节速度的 L2 奖励函数，以提供一个关于机器人动作平滑性的奖励信号，帮助训练更好地适应平台运动的挑战；weight 设置为 -0.001，表示这个奖励项在总奖励中的权重较低，并且是一个惩罚项，以鼓励机器人保持较低的关节速度；如果需要更强或更弱的惩罚信号，可以调整 weight。
     joint_acc = RewTerm(func=mdp.joint_acc_l2, weight=-2.5e-7) # 机器人关节加速度奖励，使用基于关节加速度的 L2 奖励函数，以提供一个关于机器人动作平滑性的奖励信号，帮助训练更好地适应平台运动的挑战；weight 设置为 -2.5e-7，表示这个奖励项在总奖励中的权重非常低，并且是一个惩罚项，以鼓励机器人保持较低的关节加速度；如果需要更强或更弱的惩罚信号，可以调整 weight。
     action_rate = RewTerm(func=mdp.action_rate_l2, weight=-0.05) # 机器人动作变化率奖励，使用基于动作变化率的 L2 奖励函数，以提供一个关于机器人动作平滑性的奖励信号，帮助训练更好地适应平台运动的挑战；weight 设置为 -0.05，表示这个奖励项在总奖励中的权重较低，并且是一个惩罚项，以鼓励机器人保持较低的动作变化率；如果需要更强或更弱的惩罚信号，可以调整 weight。
@@ -375,8 +379,16 @@ class RewardsCfg:
     )# 机器人腿部关节偏离奖励，使用基于关节位置偏离的 L1 奖励函数，以提供一个关于机器人动作自然性的奖励信号，帮助训练更好地适应平台运动的挑战；weight 设置为 -1.0，表示这个奖励项在总奖励中的权重较高，并且是一个惩罚项，以鼓励机器人保持腿部关节位置接近默认位置；params 中的 asset_cfg 使用正则表达式选择了所有包含 "_hip_roll_joint" 和 "_hip_yaw_joint" 的关节，以专注于腿部部分；如果需要更强或更弱的惩罚信号，可以调整 weight；如果需要调整关注的关节，可以修改 joint_names 中的正则表达式。
 
     # -- robot
-    flat_orientation_l2 = RewTerm(func=mdp.flat_orientation_l2, weight=-2.0) # 机器人平坦姿态奖励，使用基于机器人与水平面之间的夹角的 L2 奖励函数，以提供一个关于机器人姿态稳定性的奖励信号，帮助训练更好地适应平台运动的挑战；weight 设置为 -5.0，表示这个奖励项在总奖励中的权重较高，并且是一个惩罚项，以鼓励机器人保持接近平坦的姿态；如果需要更强或更弱的惩罚信号，可以调整 weight。
-    base_height = RewTerm(func=mdp.base_height_l2, weight=0, params={"target_height": 1.78}) # 机器人基座高度奖励，使用基于机器人根关节高度的 L2 奖励函数，以提供一个关于机器人垂直位置的奖励信号，帮助训练更好地适应平台运动的挑战；weight 设置为 -10，表示这个奖励项在总奖励中的权重较高，并且是一个惩罚项，以鼓励机器人保持接近目标高度；params 中的 target_height 设置为 0.78 米，表示奖励函数将以这个高度作为目标进行计算；如果需要更强或更弱的惩罚信号，可以调整 weight；如果需要调整目标高度，可以修改 target_height 的值。
+    flat_orientation_l2 = RewTerm(func=mdp.flat_orientation_l2, weight=-1.0) # 机器人平坦姿态奖励，降低权重，避免在平台 rpy 运动阶段过度抑制策略。
+    base_height = RewTerm(
+        func=mdp.base_height_relative_to_platform_l2,
+        weight=-2.0,
+        params={
+            "target_height": 0.78,
+            "robot_asset_cfg": SceneEntityCfg("robot"),
+            "platform_asset_cfg": SceneEntityCfg("platform"),
+        },
+    ) # 机器人基座高度奖励（相对平台），用相对高度替代世界系固定高度以避免误罚。
 
     # -- feet
     gait = RewTerm(
@@ -476,12 +488,17 @@ class CurriculumCfg:
     platform_motion_levels = CurrTerm(
         func=mdp.platform_motion_levels,
         params={
-            "dof_upgrade_every_episodes": 100,
-            "amp_ramp_episodes": 500,
-            "stationary_episodes": 120,
+            "dof_upgrade_every_episodes": 140,
+            "amp_ramp_episodes": 800,
+            "stationary_episodes": 200,
             "min_amp_scale": 0.1,
         },
     )# 这里设置 platform_motion_levels 的 func 为 mdp.platform_motion_levels，表示使用一个基于训练进度的课程函数来逐级增加平台运动的自由度和幅度，以提供一个逐步增加挑战性的训练环境；params 中的 dof_upgrade_every_episodes 设置为 240，表示每经过 240 轮训练后升级一个平台运动自由度；amp_ramp_episodes 设置为 800，表示在升级后的 800 轮内完成平台运动振幅从 min_amp_scale 到 1.0 的线性提升；min_amp_scale 设置为 0.1，表示初始的振幅缩放因子为 10%，以提供一个较小的运动挑战，帮助训练更好地适应平台运动的挑战；如果需要更快或更慢的课程进度，可以调整 dof_upgrade_every_episodes 和 amp_ramp_episodes；如果需要更强或更弱的初始挑战，可以调整 min_amp_scale。
+
+    # 奖励权重课程：按平台运动 level 动态调整 reward weights。
+    # level=0（平台静止）保持更接近平地的姿态/高度约束，先学会走路；
+    # 随着 level 提升逐步放松这些约束，减少平台运动带来的误罚。
+    platform_reward_weights = CurrTerm(func=mdp.platform_reward_weight_schedule)
 
     # 仅用于日志：当前平台 DoF 级别（0 表示热身期静止）。
     platform_motion_level = CurrTerm(func=mdp.platform_motion_level)

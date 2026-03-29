@@ -65,10 +65,10 @@ def ang_vel_cmd_levels(
 def platform_motion_levels(
     env: ManagerBasedRLEnv,
     env_ids: Sequence[int],
-    dof_upgrade_every_episodes: int = 100, # 平板运动难度升级的频率（以训练的episode数量为单位）
-    amp_ramp_episodes: int = 500, # 平板运动幅度提升的时间长度（以训练的episode数量为单位）
+    dof_upgrade_every_episodes: int = 140, # 平板运动难度升级的频率（以训练的episode数量为单位）
+    amp_ramp_episodes: int = 800, # 平板运动幅度提升的时间长度（以训练的episode数量为单位）
     min_amp_scale: float = 0.1, # 平板运动幅度的最小缩放比例，确保即使在训练初期也有一定的运动挑战
-    stationary_episodes: int = 120, # 热身期：前N个episode平台保持完全静止
+    stationary_episodes: int = 200, # 热身期：前N个episode平台保持完全静止
 ) -> torch.Tensor:
     """Curriculum for platform motion complexity.
 
@@ -95,6 +95,80 @@ def platform_motion_levels(
             env.platform_motion_amp_scale = min_amp_scale + (1.0 - min_amp_scale) * progress
 
     return torch.tensor(float(env.platform_motion_level), device=env.device)
+
+
+def _set_reward_term_weight(env: ManagerBasedRLEnv, term_name: str, weight: float) -> None:
+    """Update reward term weight in-place."""
+    term_cfg = env.reward_manager.get_term_cfg(term_name)
+    term_cfg.weight = float(weight)
+
+
+def platform_reward_weight_schedule(
+    env: ManagerBasedRLEnv,
+    env_ids: Sequence[int],
+) -> torch.Tensor:
+    """Adjust reward weights according to platform motion curriculum level.
+
+    Design:
+    - level 0 (platform stationary): use stronger, flat-ground-like posture penalties.
+    - level 1-2: mildly relax posture penalties.
+    - level 3-4: further relax posture penalties.
+    - level 5-6: keep the most relaxed posture penalties to avoid over-penalizing platform-induced motion.
+    """
+    # Read current platform motion level set by platform_motion_levels().
+    level = int(getattr(env, "platform_motion_level", 0))
+    level = max(0, min(6, level))
+
+    # Update only once per episode boundary to avoid per-step churn.
+    if env.common_step_counter % env.max_episode_length == 0:
+        if level <= 0:
+            # Flat-ground-like stage: encourage learning to walk first.
+            weights = {
+                "track_lin_vel_xy": 2.0,
+                "track_ang_vel_z": 1.0,
+                "base_linear_velocity": -1.0,
+                "base_angular_velocity": -0.05,
+                "flat_orientation_l2": -2.0,
+                "base_height": -5.0,
+            }
+            profile_id = 0.0
+        elif level <= 2:
+            weights = {
+                "track_lin_vel_xy": 2.0,
+                "track_ang_vel_z": 1.0,
+                "base_linear_velocity": -0.5,
+                "base_angular_velocity": -0.03,
+                "flat_orientation_l2": -1.5,
+                "base_height": -3.0,
+            }
+            profile_id = 1.0
+        elif level <= 4:
+            weights = {
+                "track_lin_vel_xy": 2.0,
+                "track_ang_vel_z": 1.0,
+                "base_linear_velocity": -0.3,
+                "base_angular_velocity": -0.025,
+                "flat_orientation_l2": -1.2,
+                "base_height": -2.5,
+            }
+            profile_id = 2.0
+        else:
+            weights = {
+                "track_lin_vel_xy": 2.0,
+                "track_ang_vel_z": 1.0,
+                "base_linear_velocity": -0.2,
+                "base_angular_velocity": -0.02,
+                "flat_orientation_l2": -1.0,
+                "base_height": -2.0,
+            }
+            profile_id = 3.0
+
+        for term_name, weight in weights.items():
+            _set_reward_term_weight(env, term_name, weight)
+
+        env.platform_reward_profile_id = profile_id
+
+    return torch.tensor(float(getattr(env, "platform_reward_profile_id", 0.0)), device=env.device)
 
 
 def platform_motion_amplitude(

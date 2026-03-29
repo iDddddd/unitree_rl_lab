@@ -64,6 +64,43 @@ def upward(env: ManagerBasedRLEnv, asset_cfg: SceneEntityCfg = SceneEntityCfg("r
     return reward
 
 
+def base_height_relative_to_platform_l2(
+    env: ManagerBasedRLEnv,
+    target_height: float,
+    robot_asset_cfg: SceneEntityCfg = SceneEntityCfg("robot"),
+    platform_asset_cfg: SceneEntityCfg = SceneEntityCfg("platform"),
+) -> torch.Tensor:
+    """Penalize base height error relative to platform height (world-z difference)."""
+    robot: RigidObject = env.scene[robot_asset_cfg.name]
+    platform: RigidObject = env.scene[platform_asset_cfg.name]
+    rel_height = robot.data.root_pos_w[:, 2] - platform.data.root_pos_w[:, 2]
+    return torch.square(rel_height - target_height)
+
+
+def base_lin_vel_z_rel_platform_l2(
+    env: ManagerBasedRLEnv,
+    robot_asset_cfg: SceneEntityCfg = SceneEntityCfg("robot"),
+    platform_asset_cfg: SceneEntityCfg = SceneEntityCfg("platform"),
+) -> torch.Tensor:
+    """Penalize base z linear velocity relative to platform z linear velocity."""
+    robot: RigidObject = env.scene[robot_asset_cfg.name]
+    platform: RigidObject = env.scene[platform_asset_cfg.name]
+    rel_lin_vel_z = robot.data.root_lin_vel_w[:, 2] - platform.data.root_lin_vel_w[:, 2]
+    return torch.square(rel_lin_vel_z)
+
+
+def base_ang_vel_xy_rel_platform_l2(
+    env: ManagerBasedRLEnv,
+    robot_asset_cfg: SceneEntityCfg = SceneEntityCfg("robot"),
+    platform_asset_cfg: SceneEntityCfg = SceneEntityCfg("platform"),
+) -> torch.Tensor:
+    """Penalize base xy angular velocity relative to platform xy angular velocity."""
+    robot: RigidObject = env.scene[robot_asset_cfg.name]
+    platform: RigidObject = env.scene[platform_asset_cfg.name]
+    rel_ang_vel_xy = robot.data.root_ang_vel_w[:, :2] - platform.data.root_ang_vel_w[:, :2]
+    return torch.sum(torch.square(rel_ang_vel_xy), dim=1)
+
+
 def joint_position_penalty(
     env: ManagerBasedRLEnv, asset_cfg: SceneEntityCfg, stand_still_scale: float, velocity_threshold: float
 ) -> torch.Tensor:
