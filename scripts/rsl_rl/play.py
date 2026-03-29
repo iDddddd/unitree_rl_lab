@@ -30,6 +30,19 @@ parser.add_argument(
     help="Use the pre-trained checkpoint from Nucleus.",
 )
 parser.add_argument("--real-time", action="store_true", default=False, help="Run in real-time, if possible.")
+parser.add_argument(
+    "--platform_motion_level",
+    type=int,
+    default=None,
+    choices=[1, 2, 3, 4, 5, 6],
+    help="Optional fixed platform motion level for play mode (1-6).",
+)
+parser.add_argument(
+    "--platform_amp_scale",
+    type=float,
+    default=None,
+    help="Optional fixed platform motion amplitude scale for play mode (range: 0-1.0).",
+)
 # append RSL-RL cli arguments
 cli_args.add_rsl_rl_args(parser)
 # append AppLauncher cli args
@@ -74,6 +87,15 @@ def main():
         use_fabric=not args_cli.disable_fabric,
         entry_point_key="play_env_cfg_entry_point",
     )
+
+    # Optional: fix platform motion difficulty during play instead of using curriculum progression.
+    if args_cli.platform_motion_level is not None or args_cli.platform_amp_scale is not None:
+        if getattr(env_cfg, "curriculum", None) is not None:
+            if hasattr(env_cfg.curriculum, "platform_motion_levels"):
+                env_cfg.curriculum.platform_motion_levels = None
+            if hasattr(env_cfg.curriculum, "platform_motion_amplitude"):
+                env_cfg.curriculum.platform_motion_amplitude = None
+
     agent_cfg: RslRlOnPolicyRunnerCfg = cli_args.parse_rsl_rl_cfg(args_cli.task, args_cli)
 
     # specify directory for logging experiments
@@ -94,6 +116,12 @@ def main():
 
     # create isaac environment
     env = gym.make(args_cli.task, cfg=env_cfg, render_mode="rgb_array" if args_cli.video else None)
+
+    # Apply fixed platform settings for play, if provided.
+    if args_cli.platform_motion_level is not None:
+        env.unwrapped.platform_motion_level = int(args_cli.platform_motion_level)
+    if args_cli.platform_amp_scale is not None:
+        env.unwrapped.platform_motion_amp_scale = float(min(max(args_cli.platform_amp_scale, 0.05), 1.0))
 
     # convert to single-agent instance if required by the RL algorithm
     if isinstance(env.unwrapped, DirectMARLEnv):
