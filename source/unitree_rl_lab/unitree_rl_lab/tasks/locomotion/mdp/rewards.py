@@ -7,6 +7,7 @@ try:
     from isaaclab.utils.math import quat_apply_inverse
 except ImportError:
     from isaaclab.utils.math import quat_rotate_inverse as quat_apply_inverse
+from isaaclab.utils.math import quat_inv, quat_mul
 from isaaclab.assets import Articulation, RigidObject
 from isaaclab.managers import SceneEntityCfg
 from isaaclab.sensors import ContactSensor
@@ -77,6 +78,22 @@ def base_height_relative_to_platform_l2(
     return torch.square(rel_height - target_height)
 
 
+def base_height_relative_to_platform_normal_l2(
+    env: ManagerBasedRLEnv,
+    target_height: float,
+    robot_asset_cfg: SceneEntityCfg = SceneEntityCfg("robot"),
+    platform_asset_cfg: SceneEntityCfg = SceneEntityCfg("platform"),
+) -> torch.Tensor:
+    """Penalize base height error along platform normal direction."""
+    robot: RigidObject = env.scene[robot_asset_cfg.name]
+    platform: RigidObject = env.scene[platform_asset_cfg.name]
+
+    rel_pos_w = robot.data.root_pos_w - platform.data.root_pos_w
+    rel_pos_p = quat_apply_inverse(platform.data.root_quat_w, rel_pos_w)
+    rel_height = rel_pos_p[:, 2]
+    return torch.square(rel_height - target_height)
+
+
 def base_lin_vel_z_rel_platform_l2(
     env: ManagerBasedRLEnv,
     robot_asset_cfg: SceneEntityCfg = SceneEntityCfg("robot"),
@@ -99,6 +116,44 @@ def base_ang_vel_xy_rel_platform_l2(
     platform: RigidObject = env.scene[platform_asset_cfg.name]
     rel_ang_vel_xy = robot.data.root_ang_vel_w[:, :2] - platform.data.root_ang_vel_w[:, :2]
     return torch.sum(torch.square(rel_ang_vel_xy), dim=1)
+
+
+def base_orientation_rel_platform_l2(
+    env: ManagerBasedRLEnv,
+    deadband_rad: float = 0.08,
+    robot_asset_cfg: SceneEntityCfg = SceneEntityCfg("robot"),
+    platform_asset_cfg: SceneEntityCfg = SceneEntityCfg("platform"),
+) -> torch.Tensor:
+    """Penalize robot roll/pitch mismatch with platform using relative quaternion."""
+    robot: RigidObject = env.scene[robot_asset_cfg.name]
+    platform: RigidObject = env.scene[platform_asset_cfg.name]
+
+    quat_rel = quat_mul(quat_inv(platform.data.root_quat_w), robot.data.root_quat_w)
+    # Quaternion is assumed as [w, x, y, z]. We keep roll/pitch mismatch and ignore yaw.
+    tilt_mag = torch.sqrt(torch.clamp(torch.square(quat_rel[:, 1]) + torch.square(quat_rel[:, 2]), min=0.0))
+    tilt_err = torch.clamp(tilt_mag - deadband_rad, min=0.0)
+    return torch.square(tilt_err)
+
+
+def platform_body_vel_deltas_l2(
+    env: ManagerBasedRLEnv,
+    lin_xy_weight: float = 1.0,
+    ang_z_weight: float = 0.5,
+    robot_asset_cfg: SceneEntityCfg = SceneEntityCfg("robot"),
+    platform_asset_cfg: SceneEntityCfg = SceneEntityCfg("platform"),
+) -> torch.Tensor:
+    """Penalize relative platform-body velocity mismatch in robot body frame."""
+    robot: RigidObject = env.scene[robot_asset_cfg.name]
+    platform: RigidObject = env.scene[platform_asset_cfg.name]
+
+    rel_lin_vel_w = platform.data.root_lin_vel_w - robot.data.root_lin_vel_w
+    rel_ang_vel_w = platform.data.root_ang_vel_w - robot.data.root_ang_vel_w
+    rel_lin_vel_b = quat_apply_inverse(robot.data.root_quat_w, rel_lin_vel_w)
+    rel_ang_vel_b = quat_apply_inverse(robot.data.root_quat_w, rel_ang_vel_w)
+
+    lin_xy_term = torch.sum(torch.square(rel_lin_vel_b[:, :2]), dim=1)
+    ang_z_term = torch.square(rel_ang_vel_b[:, 2])
+    return lin_xy_weight * lin_xy_term + ang_z_weight * ang_z_term
 
 
 def joint_position_penalty(
@@ -161,6 +216,34 @@ def foot_clearance_reward(
     asset: RigidObject = env.scene[asset_cfg.name]
     foot_z_target_error = torch.square(asset.data.body_pos_w[:, asset_cfg.body_ids, 2] - target_height)
     foot_velocity_tanh = torch.tanh(tanh_mult * torch.norm(asset.data.body_lin_vel_w[:, asset_cfg.body_ids, :2], dim=2))
+    reward = foot_z_target_error * foot_velocity_tanh
+    return torch.exp(-torch.sum(reward, dim=1) / std)
+
+
+def foot_clearance_relative_platform_reward(
+    env: ManagerBasedRLEnv,
+    asset_cfg: SceneEntityCfg,
+    platform_asset_cfg: SceneEntityCfg,
+    target_height: float,
+    std: float,
+    tanh_mult: float,
+) -> torch.Tensor:
+    """Reward foot clearance measured in platform frame."""
+    asset: RigidObject = env.scene[asset_cfg.name]
+    platform: RigidObject = env.scene[platform_asset_cfg.name]
+
+    rel_pos_w = asset.data.body_pos_w[:, asset_cfg.body_ids, :] - platform.data.root_pos_w.unsqueeze(1)
+    rel_pos_p = torch.zeros_like(rel_pos_w)
+    for i in range(rel_pos_w.shape[1]):
+        rel_pos_p[:, i, :] = quat_apply_inverse(platform.data.root_quat_w, rel_pos_w[:, i, :])
+
+    rel_vel_w = asset.data.body_lin_vel_w[:, asset_cfg.body_ids, :] - platform.data.root_lin_vel_w.unsqueeze(1)
+    rel_vel_p = torch.zeros_like(rel_vel_w)
+    for i in range(rel_vel_w.shape[1]):
+        rel_vel_p[:, i, :] = quat_apply_inverse(platform.data.root_quat_w, rel_vel_w[:, i, :])
+
+    foot_z_target_error = torch.square(rel_pos_p[:, :, 2] - target_height)
+    foot_velocity_tanh = torch.tanh(tanh_mult * torch.norm(rel_vel_p[:, :, :2], dim=2))
     reward = foot_z_target_error * foot_velocity_tanh
     return torch.exp(-torch.sum(reward, dim=1) / std)
 
@@ -230,10 +313,20 @@ def feet_gait(
     for i in range(len(sensor_cfg.body_ids)):
         is_stance = leg_phase[:, i] < threshold
         reward += ~(is_stance ^ is_contact[:, i])
+    reward /= max(1, len(sensor_cfg.body_ids))
 
     if command_name is not None:
         cmd_norm = torch.norm(env.command_manager.get_command(command_name), dim=1)
-        reward *= cmd_norm > 0.1
+        moving_mask = cmd_norm > 0.05
+        reward *= moving_mask
+
+        # Extra anti-shuffle shaping for biped gait.
+        if len(sensor_cfg.body_ids) == 2:
+            move_scale = torch.clamp((cmd_norm - 0.05) / 0.35, 0.0, 1.0)
+            both_contact = (is_contact[:, 0] & is_contact[:, 1]).float()
+            no_contact = (~(is_contact[:, 0] | is_contact[:, 1])).float()
+            alternating = (is_contact[:, 0] ^ is_contact[:, 1]).float()
+            reward = reward + 0.15 * move_scale * alternating - 0.35 * move_scale * both_contact - 0.10 * move_scale * no_contact
     return reward
 
 

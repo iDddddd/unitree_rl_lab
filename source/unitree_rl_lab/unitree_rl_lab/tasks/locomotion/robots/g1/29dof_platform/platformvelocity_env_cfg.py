@@ -45,7 +45,7 @@ PLATFORM_THICKNESS = 0.2 # 平台厚度，设置为0.2米以确保平台在物�
 PLATFORM_TOP_Z = 1.0 # 平台顶部的高度，设置为1.0米以提供足够的空间让机器人在平台上运动，同时也可以调整以增加或减少运动难度
 
 COBBLESTONE_ROAD_CFG = terrain_gen.TerrainGeneratorCfg(
-    size=(50.0, 50.0), # 生成的平台尺寸，设置为100x100米以提供足够的空间让机器人在上面运动
+    size=(50.0, 50.0), # 生成的平台尺寸，设置为10x10米以提供足够的空间让机器人在上面运动
     border_width=20.0, # 平台边界宽度，设置为20米以确保机器人在接近边界时能够感受到边界的存在，同时也可以调整以增加或减少运动难度
     num_rows=9, # 生成的石块行数，设置为9行以提供适度的复杂性，同时也可以调整以增加或减少运动难度
     num_cols=21, # 生成的石块列数，设置为21列以提供适度的复杂性，同时也可以调整以增加或减少运动难度
@@ -220,7 +220,7 @@ class EventCfg:
             "lin_frequency_hz": 0.2,
             "max_linear_acc": 0.5,
             # at 4m radius (half platform size), 0.125 rad/s^2 -> 0.5 m/s^2 tangential acceleration
-            "max_angular_acc": 0.125,
+            "max_angular_acc": 0.05,
         },# 这里设置 interval_range_s 为 (0.02, 0.02)，表示每隔 0.02 秒更新一次平台的位置，以提供连续的运动挑战；lin_frequency_hz 设置为 0.2 Hz，表示平台将以 0.2 Hz 的频率进行正弦运动；max_linear_acc 设置为 0.5 m/s^2，表示平台的线性加速度将被限制在这个值，以确保运动的平滑性和可控性；max_angular_acc 设置为 0.125 rad/s^2，表示平台的角加速度将被限制在这个值，以确保旋转运动的平滑性和可控性；如果需要更快或更慢的运动频率，可以调整 lin_frequency_hz；如果需要更强或更弱的运动幅度，可以调整 max_linear_acc 和 max_angular_acc。
     )
 
@@ -300,6 +300,13 @@ class ObservationsCfg:
 
         base_lin_vel = ObsTerm(func=mdp.base_lin_vel) # 机器人基座线速度观测
         base_ang_vel = ObsTerm(func=mdp.base_ang_vel, scale=0.2) # 机器人基座角速度观测
+        platform_body_vel_deltas = ObsTerm(
+            func=mdp.platform_body_vel_deltas_b,
+            params={
+                "robot_asset_cfg": SceneEntityCfg("robot"),
+                "platform_asset_cfg": SceneEntityCfg("platform"),
+            },
+        ) # critic 额外特权观测：平台-机体相对速度 [v_xy^B, w_z^B]，用于稳定价值估计。
         projected_gravity = ObsTerm(func=mdp.projected_gravity) # 机器人重力投影观测
         velocity_commands = ObsTerm(func=mdp.generated_commands, params={"command_name": "base_velocity"}) # 机器人当前速度命令观测
         joint_pos_rel = ObsTerm(func=mdp.joint_pos_rel) # 机器人关节位置相对观测
@@ -340,9 +347,19 @@ class RewardsCfg:
     base_angular_velocity = RewTerm(
         func=mdp.base_ang_vel_xy_rel_platform_l2, weight=-0.02
     ) # 机器人基座角速度奖励（相对平台 roll/pitch 角速度），减少平台旋转带来的误罚。
+    relative_platform_velocity = RewTerm(
+        func=mdp.platform_body_vel_deltas_l2,
+        weight=-0.05,
+        params={
+            "lin_xy_weight": 1.0,
+            "ang_z_weight": 0.5,
+            "robot_asset_cfg": SceneEntityCfg("robot"),
+            "platform_asset_cfg": SceneEntityCfg("platform"),
+        },
+    ) # 新增：惩罚平台与机体相对速度误差，强化对外界扰动的鲁棒性。
     joint_vel = RewTerm(func=mdp.joint_vel_l2, weight=-0.001) # 机器人关节速度奖励，使用基于关节速度的 L2 奖励函数，以提供一个关于机器人动作平滑性的奖励信号，帮助训练更好地适应平台运动的挑战；weight 设置为 -0.001，表示这个奖励项在总奖励中的权重较低，并且是一个惩罚项，以鼓励机器人保持较低的关节速度；如果需要更强或更弱的惩罚信号，可以调整 weight。
     joint_acc = RewTerm(func=mdp.joint_acc_l2, weight=-2.5e-7) # 机器人关节加速度奖励，使用基于关节加速度的 L2 奖励函数，以提供一个关于机器人动作平滑性的奖励信号，帮助训练更好地适应平台运动的挑战；weight 设置为 -2.5e-7，表示这个奖励项在总奖励中的权重非常低，并且是一个惩罚项，以鼓励机器人保持较低的关节加速度；如果需要更强或更弱的惩罚信号，可以调整 weight。
-    action_rate = RewTerm(func=mdp.action_rate_l2, weight=-0.05) # 机器人动作变化率奖励，使用基于动作变化率的 L2 奖励函数，以提供一个关于机器人动作平滑性的奖励信号，帮助训练更好地适应平台运动的挑战；weight 设置为 -0.05，表示这个奖励项在总奖励中的权重较低，并且是一个惩罚项，以鼓励机器人保持较低的动作变化率；如果需要更强或更弱的惩罚信号，可以调整 weight。
+    action_rate = RewTerm(func=mdp.action_rate_l2, weight=-0.03) # 适当放松动作变化率惩罚，减少策略因“少动更安全”导致的追步/并步局部最优。
     dof_pos_limits = RewTerm(func=mdp.joint_pos_limits, weight=-5.0) # 机器人关节位置限制奖励，使用基于关节位置限制的奖励函数，以提供一个关于机器人动作可行性的奖励信号，帮助训练更好地适应平台运动的挑战；weight 设置为 -5.0，表示这个奖励项在总奖励中的权重较高，并且是一个惩罚项，以鼓励机器人保持在关节位置限制范围内；如果需要更强或更弱的惩罚信号，可以调整 weight。
     energy = RewTerm(func=mdp.energy, weight=-2e-5) # 机器人能量奖励，使用基于能量的奖励函数，以提供一个关于机器人效率的奖励信号，帮助训练更好地适应平台运动的挑战；weight 设置为 -2e-5，表示这个奖励项在总奖励中的权重较低，并且是一个惩罚项，以鼓励机器人保持较低的能量消耗；如果需要更强或更弱的惩罚信号，可以调整 weight。
 
@@ -374,14 +391,22 @@ class RewardsCfg:
     ) # 机器人腰部关节偏离奖励，使用基于关节位置偏离的 L1 奖励函数，以提供一个关于机器人动作自然性的奖励信号，帮助训练更好地适应平台运动的挑战；weight 设置为 -1，表示这个奖励项在总奖励中的权重较高，并且是一个惩罚项，以鼓励机器人保持腰部关节位置接近默认位置；params 中的 asset_cfg 使用正则表达式选择了所有包含 "waist" 的关节，以专注于腰部部分；如果需要更强或更弱的惩罚信号，可以调整 weight；如果需要调整关注的关节，可以修改 joint_names 中的正则表达式。
     joint_deviation_legs = RewTerm(
         func=mdp.joint_deviation_l1,
-        weight=-1.0,
+        weight=-0.5,
         params={"asset_cfg": SceneEntityCfg("robot", joint_names=[".*_hip_roll_joint", ".*_hip_yaw_joint"])},
     )# 机器人腿部关节偏离奖励，使用基于关节位置偏离的 L1 奖励函数，以提供一个关于机器人动作自然性的奖励信号，帮助训练更好地适应平台运动的挑战；weight 设置为 -1.0，表示这个奖励项在总奖励中的权重较高，并且是一个惩罚项，以鼓励机器人保持腿部关节位置接近默认位置；params 中的 asset_cfg 使用正则表达式选择了所有包含 "_hip_roll_joint" 和 "_hip_yaw_joint" 的关节，以专注于腿部部分；如果需要更强或更弱的惩罚信号，可以调整 weight；如果需要调整关注的关节，可以修改 joint_names 中的正则表达式。
 
     # -- robot
-    flat_orientation_l2 = RewTerm(func=mdp.flat_orientation_l2, weight=-1.0) # 机器人平坦姿态奖励，降低权重，避免在平台 rpy 运动阶段过度抑制策略。
+    flat_orientation_l2 = RewTerm(
+        func=mdp.base_orientation_rel_platform_l2,
+        weight=-1.0,
+        params={
+            "deadband_rad": 0.08,
+            "robot_asset_cfg": SceneEntityCfg("robot"),
+            "platform_asset_cfg": SceneEntityCfg("platform"),
+        },
+    ) # 优化：改为相对平台姿态惩罚（roll/pitch），降低平台主动倾斜时的误罚。
     base_height = RewTerm(
-        func=mdp.base_height_relative_to_platform_l2,
+        func=mdp.base_height_relative_to_platform_normal_l2,
         weight=-2.0,
         params={
             "target_height": 0.78,
@@ -393,11 +418,11 @@ class RewardsCfg:
     # -- feet
     gait = RewTerm(
         func=mdp.feet_gait,
-        weight=0.5,
+        weight=0.8,
         params={
-            "period": 0.8,
+            "period": 0.7,
             "offset": [0.0, 0.5],
-            "threshold": 0.55,
+            "threshold": 0.5,
             "command_name": "base_velocity",
             "sensor_cfg": SceneEntityCfg("contact_forces", body_names=".*ankle_roll.*"),
         },
@@ -411,15 +436,21 @@ class RewardsCfg:
         },
     ) # 机器人足部滑动奖励，使用基于足部滑动的奖励函数，以提供一个关于机器人足部稳定性的奖励信号，帮助训练更好地适应平台运动的挑战；weight 设置为 -0.2，表示这个奖励项在总奖励中的权重较低，并且是一个惩罚项，以鼓励机器人减少足部滑动；params 中的 asset_cfg 使用正则表达式选择了所有包含 "ankle_roll" 的身体部件，以专注于足部信息；sensor_cfg 使用正则表达式选择了所有包含 "ankle_roll" 的接触力传感器，以专注于足部接触信息；如果需要更强或更弱的惩罚信号，可以调整 weight；如果需要调整关注的身体部件或传感器，可以修改相应的正则表达式。
     feet_clearance = RewTerm(
-        func=mdp.foot_clearance_reward,
+        func=mdp.foot_clearance_relative_platform_reward,
         weight=1.0,
         params={
             "std": 0.05,
             "tanh_mult": 2.0,
             "target_height": 0.1,
             "asset_cfg": SceneEntityCfg("robot", body_names=".*ankle_roll.*"),
+            "platform_asset_cfg": SceneEntityCfg("platform"),
         },
     ) # 机器人足部离地奖励，使用基于足部离地高度的奖励函数，以提供一个关于机器人步态质量的奖励信号，帮助训练更好地适应平台运动的挑战；weight 设置为 1.0，表示这个奖励项在总奖励中的权重较高，以强调足部离地的重要性；params 中的 std 设置为 0.05，表示奖励函数中的误差将被缩放为原来的 0.05 米，以提供适度的奖励信号；tanh_mult 设置为 2.0，表示使用双曲正切函数来计算奖励时的乘数，以调整奖励曲线的形状；target_height 设置为 0.1 米，表示奖励函数将以这个高度作为目标进行计算；asset_cfg 使用正则表达式选择了所有包含 "ankle_roll" 的身体部件，以专注于足部信息；如果需要更强或更弱的奖励信号，可以调整 weight；如果需要调整奖励函数参数，可以修改 params 中的值。
+    feet_air_time_balance = RewTerm(
+        func=mdp.air_time_variance_penalty,
+        weight=-0.1,
+        params={"sensor_cfg": SceneEntityCfg("contact_forces", body_names=".*ankle_roll.*")},
+    ) # 抑制两脚腾空/落地时长差异过大，减少“一脚迈出后另一脚急追”现象。
 
     # -- other
     undesired_contacts = RewTerm(
@@ -492,6 +523,10 @@ class CurriculumCfg:
             "amp_ramp_episodes": 800,
             "stationary_episodes": 200,
             "min_amp_scale": 0.1,
+            "min_episodes_per_level": 80,
+            "base_quality_threshold": 0.72,
+            "per_level_quality_increment": 0.02,
+            "quality_ema_alpha": 0.90,
         },
     )# 这里设置 platform_motion_levels 的 func 为 mdp.platform_motion_levels，表示使用一个基于训练进度的课程函数来逐级增加平台运动的自由度和幅度，以提供一个逐步增加挑战性的训练环境；params 中的 dof_upgrade_every_episodes 设置为 240，表示每经过 240 轮训练后升级一个平台运动自由度；amp_ramp_episodes 设置为 800，表示在升级后的 800 轮内完成平台运动振幅从 min_amp_scale 到 1.0 的线性提升；min_amp_scale 设置为 0.1，表示初始的振幅缩放因子为 10%，以提供一个较小的运动挑战，帮助训练更好地适应平台运动的挑战；如果需要更快或更慢的课程进度，可以调整 dof_upgrade_every_episodes 和 amp_ramp_episodes；如果需要更强或更弱的初始挑战，可以调整 min_amp_scale。
 
@@ -505,6 +540,9 @@ class CurriculumCfg:
 
     # 仅用于日志：当前平台振幅缩放系数。
     platform_amp_scale = CurrTerm(func=mdp.platform_amp_scale)
+    # 仅用于日志：课程升级质量分数（即时值与EMA）。
+    platform_curriculum_score = CurrTerm(func=mdp.platform_curriculum_score)
+    platform_curriculum_score_ema = CurrTerm(func=mdp.platform_curriculum_score_ema)
 
     # 平台运动幅度课程：根据当前课程级别设置平台加速度峰值和频率。
     # params.max_linear_acc：平台线加速度上限。
