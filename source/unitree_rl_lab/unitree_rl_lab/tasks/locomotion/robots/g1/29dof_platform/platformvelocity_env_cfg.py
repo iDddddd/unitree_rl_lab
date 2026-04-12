@@ -39,13 +39,13 @@ from unitree_rl_lab.tasks.locomotion import mdp
 # - RobotEnvCfg：汇总所有配置，设置仿真参数、环境规模、节点周期等
 #-----------------------------------------------------------------------------
 
-PLATFORM_SIZE_X = 10.0
-PLATFORM_SIZE_Y = 10.0 # 平台尺寸，确保足够大以容纳机器人在上面运动，同时也可以调整以增加或减少运动难度
+PLATFORM_SIZE_X = 20.0
+PLATFORM_SIZE_Y = 20.0 # 平台尺寸，确保足够大以容纳机器人在上面运动，同时也可以调整以增加或减少运动难度
 PLATFORM_THICKNESS = 0.2 # 平台厚度，设置为0.2米以确保平台在物理模拟中具有足够的厚度，避免穿透问题，同时也不会过高以影响机器人运动的真实性
 PLATFORM_TOP_Z = 1.0 # 平台顶部的高度，设置为1.0米以提供足够的空间让机器人在平台上运动，同时也可以调整以增加或减少运动难度
 
 COBBLESTONE_ROAD_CFG = terrain_gen.TerrainGeneratorCfg(
-    size=(10.0, 10.0), # 生成的平台尺寸，设置为10x10米以提供足够的空间让机器人在上面运动
+    size=(100.0, 100.0), # 生成的平台尺寸，设置为10x10米以提供足够的空间让机器人在上面运动
     border_width=20.0, # 平台边界宽度，设置为20米以确保机器人在接近边界时能够感受到边界的存在，同时也可以调整以增加或减少运动难度
     num_rows=9, # 生成的石块行数，设置为9行以提供适度的复杂性，同时也可以调整以增加或减少运动难度
     num_cols=21, # 生成的石块列数，设置为21列以提供适度的复杂性，同时也可以调整以增加或减少运动难度
@@ -176,6 +176,14 @@ class EventCfg:
             "force_range": (0.0, 0.0),
             "torque_range": (-0.0, 0.0),
         }, # 这里设置 force_range 和 torque_range 都为 (0.0, 0.0)，表示在重置时不施加额外的外部力和力矩，以提供一个相对稳定的起始状态；如果需要更具挑战性的重置，可以增加这些范围。
+    )
+
+    reset_platform = EventTerm(
+        func=mdp.reset_platform_state, # 在机器人重置前，先将平台恢复到默认位姿并清零速度，同时重置该环境的平台运动相位，避免机器人生成时与抬升/倾斜的平台发生穿插碰撞。
+        mode="reset",
+        params={
+            "asset_cfg": SceneEntityCfg("platform"),
+        },
     )
 
     reset_base = EventTerm(
@@ -513,12 +521,18 @@ class CurriculumCfg:
 
     # 平台运动级数课程：逐级增加平台运动自由度/幅度
     # params:
-    #   - dof_upgrade_every_episodes：多少轮训练后升级一个自由度
+    #   - motion_mode：4种训练模式之一
+    #       "rpy" 仅旋转 DoF，按 roll -> pitch -> yaw 依次开启
+    #       "xyz" 仅平移 DoF，按 x -> y -> z 依次开启
+    #       "z_rp" 三自由度，按 z -> roll -> pitch 依次开启
+    #       "full" 六自由度，按 x -> y -> z -> roll -> pitch -> yaw 依次开启
+    #   - dof_upgrade_every_episodes：多少轮训练后升级一个级别
     #   - amp_ramp_episodes：在多少轮内完成运动振幅从 min_amp_scale 到 1.0 的线性提升
     #   - min_amp_scale：初始振幅缩放因子
     platform_motion_levels = CurrTerm(
         func=mdp.platform_motion_levels,
         params={
+            "motion_mode": "rpy",
             "dof_upgrade_every_episodes": 140,
             "amp_ramp_episodes": 800,
             "stationary_episodes": 200,
