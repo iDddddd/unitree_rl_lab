@@ -39,10 +39,24 @@ from unitree_rl_lab.tasks.locomotion import mdp
 # - RobotEnvCfg：汇总所有配置，设置仿真参数、环境规模、节点周期等
 #-----------------------------------------------------------------------------
 
-PLATFORM_SIZE_X = 20.0
-PLATFORM_SIZE_Y = 20.0 # 平台尺寸，确保足够大以容纳机器人在上面运动，同时也可以调整以增加或减少运动难度
+PLATFORM_SIZE_X = 50.0
+PLATFORM_SIZE_Y = 50.0 # 平台尺寸，确保足够大以容纳机器人在上面运动，同时也可以调整以增加或减少运动难度
 PLATFORM_THICKNESS = 0.2 # 平台厚度，设置为0.2米以确保平台在物理模拟中具有足够的厚度，避免穿透问题，同时也不会过高以影响机器人运动的真实性
 PLATFORM_TOP_Z = 1.0 # 平台顶部的高度，设置为1.0米以提供足够的空间让机器人在平台上运动，同时也可以调整以增加或减少运动难度
+LEG_JOINT_NAMES = [
+    "left_hip_pitch_joint",
+    "left_hip_roll_joint",
+    "left_hip_yaw_joint",
+    "left_knee_joint",
+    "left_ankle_pitch_joint",
+    "left_ankle_roll_joint",
+    "right_hip_pitch_joint",
+    "right_hip_roll_joint",
+    "right_hip_yaw_joint",
+    "right_knee_joint",
+    "right_ankle_pitch_joint",
+    "right_ankle_roll_joint",
+]
 
 COBBLESTONE_ROAD_CFG = terrain_gen.TerrainGeneratorCfg(
     size=(100.0, 100.0), # 生成的平台尺寸，设置为10x10米以提供足够的空间让机器人在上面运动
@@ -295,7 +309,7 @@ class ObservationsCfg:
         # gait_phase = ObsTerm(func=mdp.gait_phase, params={"period": 0.8}) # 机器人步态相位观测，基于一个周期为 0.8 秒的正弦函数计算步态相位，以提供关于机器人运动周期的信息，帮助训练更好地适应平台运动的挑战；如果需要更复杂的步态表示，可以添加额外的处理或特征提取。
 
         def __post_init__(self):
-            self.history_length = 5
+            self.history_length = 1
             self.enable_corruption = True
             self.concatenate_terms = True # 是否将所有观测项连接成一个大向量，设置为 True 以提供一个统一的观测表示，帮助训练更好地适应平台运动的挑战；如果需要分组或分开处理观测项，可以设置为 False。
 
@@ -327,10 +341,77 @@ class ObservationsCfg:
         # )
 
         def __post_init__(self):
-            self.history_length = 5 # 这里设置了 critic 观测组的 history_length 为 5，表示 critic 将使用最近 5 个时间步的观测历史来进行价值估计，以提供更多的时间上下文信息，帮助训练更好地适应平台运动的挑战；如果需要更短或更长的历史，可以调整这个值。
+            self.history_length = 1 # critic 使用当前时刻的特权观测；历史信息交给 ROA estimator 单独编码。
 
     # privileged observations
     critic: CriticCfg = CriticCfg()
+
+    @configclass
+    class EstimatorHistoryCfg(ObsGroup):
+        """History observations for the ROA estimator."""
+
+        base_lin_acc = ObsTerm(
+            func=mdp.base_lin_acc_b,
+            params={"asset_cfg": SceneEntityCfg("robot", body_names="torso_link")},
+        )
+        base_ang_vel = ObsTerm(func=mdp.base_ang_vel)
+        base_roll_pitch = ObsTerm(func=mdp.base_roll_pitch)
+        joint_pos_rel = ObsTerm(
+            func=mdp.joint_pos_rel,
+            params={"asset_cfg": SceneEntityCfg("robot", joint_names=LEG_JOINT_NAMES)},
+        )
+        joint_vel_rel = ObsTerm(
+            func=mdp.joint_vel_rel,
+            params={"asset_cfg": SceneEntityCfg("robot", joint_names=LEG_JOINT_NAMES)},
+        )
+        last_leg_action = ObsTerm(
+            func=mdp.last_action_subset,
+            params={"asset_cfg": SceneEntityCfg("robot", joint_names=LEG_JOINT_NAMES)},
+        )
+
+        def __post_init__(self):
+            self.history_length = 20
+            self.enable_corruption = False
+            self.concatenate_terms = True
+
+    estimator_history: EstimatorHistoryCfg = EstimatorHistoryCfg()
+
+    @configclass
+    class EstimatorTargetCfg(ObsGroup):
+        """Privileged teacher labels for the ROA estimator."""
+
+        foot_contact = ObsTerm(
+            func=mdp.binary_foot_contact,
+            params={
+                "sensor_cfg": SceneEntityCfg(
+                    "contact_forces",
+                    body_names=["left_ankle_roll_link", "right_ankle_roll_link"],
+                ),
+                "threshold": 10.0,
+            },
+        )
+        base_lin_vel = ObsTerm(func=mdp.base_lin_vel_b)
+        platform_lin_vel = ObsTerm(
+            func=mdp.platform_lin_vel_b,
+            params={
+                "robot_asset_cfg": SceneEntityCfg("robot"),
+                "platform_asset_cfg": SceneEntityCfg("platform"),
+            },
+        )
+        platform_ang_vel = ObsTerm(
+            func=mdp.platform_ang_vel_b,
+            params={
+                "robot_asset_cfg": SceneEntityCfg("robot"),
+                "platform_asset_cfg": SceneEntityCfg("platform"),
+            },
+        )
+
+        def __post_init__(self):
+            self.history_length = 1
+            self.enable_corruption = False
+            self.concatenate_terms = True
+
+    estimator_target: EstimatorTargetCfg = EstimatorTargetCfg()
 
 @configclass
 class RewardsCfg:
@@ -532,7 +613,7 @@ class CurriculumCfg:
     platform_motion_levels = CurrTerm(
         func=mdp.platform_motion_levels,
         params={
-            "motion_mode": "rpy",
+            "motion_mode": "full", #设置平台运动的自由度
             "dof_upgrade_every_episodes": 140,
             "amp_ramp_episodes": 800,
             "stationary_episodes": 200,
