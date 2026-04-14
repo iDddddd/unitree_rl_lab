@@ -12,7 +12,7 @@ from isaaclab.managers import RewardTermCfg as RewTerm
 from isaaclab.managers import SceneEntityCfg
 from isaaclab.managers import TerminationTermCfg as DoneTerm
 from isaaclab.scene import InteractiveSceneCfg
-from isaaclab.sensors import ContactSensorCfg, RayCasterCfg, patterns
+from isaaclab.sensors import ContactSensorCfg, ImuCfg, RayCasterCfg, patterns
 from isaaclab.terrains import TerrainImporterCfg
 from isaaclab.utils import configclass
 from isaaclab.utils.assets import ISAAC_NUCLEUS_DIR, ISAACLAB_NUCLEUS_DIR
@@ -130,6 +130,36 @@ class RobotSceneCfg(InteractiveSceneCfg):
         mesh_prim_paths=["/World/ground"],
     )
     contact_forces = ContactSensorCfg(prim_path="{ENV_REGEX_NS}/Robot/.*", history_length=3, track_air_time=True) # 接触力传感器配置，安装在机器人所有链接上，以测量机器人与平台之间的接触力，帮助训练更好地适应平台运动的挑战；history_length 设置为 3 以提供短期的接触历史，track_air_time 设置为 True 以跟踪机器人离地时间，提供更多关于机器人状态的信息。
+    left_foot_contact = ContactSensorCfg(
+        prim_path="{ENV_REGEX_NS}/Robot/left_ankle_roll_link",
+        history_length=3,
+        track_air_time=True,
+        filter_prim_paths_expr=["{ENV_REGEX_NS}/Platform"],
+    )
+    right_foot_contact = ContactSensorCfg(
+        prim_path="{ENV_REGEX_NS}/Robot/right_ankle_roll_link",
+        history_length=3,
+        track_air_time=True,
+        filter_prim_paths_expr=["{ENV_REGEX_NS}/Platform"],
+    )
+    base_imu = ImuCfg(
+        prim_path="{ENV_REGEX_NS}/Robot/torso_link",
+        offset=ImuCfg.OffsetCfg(pos=(-0.03959, -0.00224, 0.14792)),
+        gravity_bias=(0.0, 0.0, 0.0),
+        debug_vis=False,
+    )
+    left_foot_imu = ImuCfg(
+        prim_path="{ENV_REGEX_NS}/Robot/left_ankle_roll_link",
+        offset=ImuCfg.OffsetCfg(pos=(0.035, 0.0, -0.03)),
+        gravity_bias=(0.0, 0.0, 0.0),
+        debug_vis=False,
+    )
+    right_foot_imu = ImuCfg(
+        prim_path="{ENV_REGEX_NS}/Robot/right_ankle_roll_link",
+        offset=ImuCfg.OffsetCfg(pos=(0.035, 0.0, -0.03)),
+        gravity_bias=(0.0, 0.0, 0.0),
+        debug_vis=False,
+    )
     # lights，设置一个环境范围内的全局光源，以提供均匀的照明，帮助训练更好地适应平台运动的挑战；如果需要更复杂的照明效果，可以添加更多的光源或使用不同类型的光源。
     sky_light = AssetBaseCfg(
         prim_path="/World/skyLight",
@@ -288,6 +318,18 @@ class ObservationsCfg:
         # observation terms (order preserved)
         base_ang_vel = ObsTerm(func=mdp.base_ang_vel, scale=0.2, noise=Unoise(n_min=-0.2, n_max=0.2)) # 机器人基座角速度观测，添加噪声以增加训练的鲁棒性；scale 设置为 0.2 以缩放观测值，noise 设置为 Uniform(-0.2, 0.2) 以提供适度的观测噪声，帮助训练更好地适应平台运动的挑战；如果需要更精确或更嘈杂的观测，可以调整 scale 和 noise。
         projected_gravity = ObsTerm(func=mdp.projected_gravity, noise=Unoise(n_min=-0.05, n_max=0.05)) # 机器人重力投影观测，添加噪声以增加训练的鲁棒性；noise 设置为 Uniform(-0.05, 0.05) 以提供适度的观测噪声，帮助训练更好地适应平台运动的挑战；如果需要更精确或更嘈杂的观测，可以调整 noise。
+        ekf_base_pos_rel_platform = ObsTerm(
+            func=mdp.ekf_base_pos_rel_platform,
+            noise=Unoise(n_min=-0.02, n_max=0.02),
+        ) # EKF 估计的机身相对平台位置观测。
+        ekf_base_vel_rel_platform = ObsTerm(
+            func=mdp.ekf_base_vel_rel_platform,
+            noise=Unoise(n_min=-0.05, n_max=0.05),
+        ) # EKF 估计的机身相对平台速度观测。
+        ekf_base_quat_rel_platform = ObsTerm(
+            func=mdp.ekf_base_quat_rel_platform,
+            noise=Unoise(n_min=-0.01, n_max=0.01),
+        ) # EKF 估计的机身相对平台姿态观测。
         velocity_commands = ObsTerm(func=mdp.generated_commands, params={"command_name": "base_velocity"}) # 机器人当前速度命令观测，直接使用生成的命令作为观测项，以提供清晰的目标信息，帮助训练更好地适应平台运动的挑战；如果需要更复杂的命令表示，可以添加额外的处理或特征提取。
         joint_pos_rel = ObsTerm(func=mdp.joint_pos_rel, noise=Unoise(n_min=-0.01, n_max=0.01)) # 机器人关节位置相对观测，添加噪声以增加训练的鲁棒性；noise 设置为 Uniform(-0.01, 0.01) 以提供适度的观测噪声，帮助训练更好地适应平台运动的挑战；如果需要更精确或更嘈杂的观测，可以调整 noise。
         joint_vel_rel = ObsTerm(func=mdp.joint_vel_rel, scale=0.05, noise=Unoise(n_min=-1.5, n_max=1.5)) # 机器人关节速度相对观测，添加噪声以增加训练的鲁棒性；scale 设置为 0.05 以缩放观测值，noise 设置为 Uniform(-1.5, 1.5) 以提供较大的观测噪声，帮助训练更好地适应平台运动的挑战；如果需要更精确或更嘈杂的观测，可以调整 scale 和 noise。
@@ -315,6 +357,9 @@ class ObservationsCfg:
                 "platform_asset_cfg": SceneEntityCfg("platform"),
             },
         ) # critic 额外特权观测：平台-机体相对速度 [v_xy^B, w_z^B]，用于稳定价值估计。
+        ekf_base_pos_rel_platform = ObsTerm(func=mdp.ekf_base_pos_rel_platform) # EKF 估计的机身相对平台位置观测。
+        ekf_base_vel_rel_platform = ObsTerm(func=mdp.ekf_base_vel_rel_platform) # EKF 估计的机身相对平台速度观测。
+        ekf_base_quat_rel_platform = ObsTerm(func=mdp.ekf_base_quat_rel_platform) # EKF 估计的机身相对平台姿态观测。
         projected_gravity = ObsTerm(func=mdp.projected_gravity) # 机器人重力投影观测
         velocity_commands = ObsTerm(func=mdp.generated_commands, params={"command_name": "base_velocity"}) # 机器人当前速度命令观测
         joint_pos_rel = ObsTerm(func=mdp.joint_pos_rel) # 机器人关节位置相对观测
@@ -574,6 +619,9 @@ class CurriculumCfg:
 class RobotEnvCfg(ManagerBasedRLEnvCfg):
     """Configuration for the locomotion velocity-tracking environment."""
 
+    ekf_debug_vis: bool = False
+    ekf_debug_env_id: int = 0
+
     # Scene settings - 包含环境数量、间距等。
     scene: RobotSceneCfg = RobotSceneCfg(num_envs=4096, env_spacing=12.0)
     # Basic settings - 包含仿真时间步长、渲染间隔等。
@@ -600,6 +648,11 @@ class RobotEnvCfg(ManagerBasedRLEnvCfg):
         # update sensor update periods 
         # we tick all the sensors based on the smallest update period (physics update period)
         self.scene.contact_forces.update_period = self.sim.dt
+        self.scene.left_foot_contact.update_period = self.sim.dt
+        self.scene.right_foot_contact.update_period = self.sim.dt
+        self.scene.base_imu.update_period = self.sim.dt
+        self.scene.left_foot_imu.update_period = self.sim.dt
+        self.scene.right_foot_imu.update_period = self.sim.dt
         self.scene.height_scanner.update_period = self.decimation * self.sim.dt
 
         # check if terrain levels curriculum is enabled - if so, enable curriculum for terrain generator
@@ -619,3 +672,5 @@ class RobotPlayEnvCfg(RobotEnvCfg):
         super().__post_init__()
         self.scene.num_envs = 32
         self.commands.base_velocity.ranges = self.commands.base_velocity.limit_ranges
+        self.ekf_debug_vis = True
+        self.ekf_debug_env_id = 0
