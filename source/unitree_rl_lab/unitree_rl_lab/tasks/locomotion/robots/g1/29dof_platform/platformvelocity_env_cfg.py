@@ -42,7 +42,18 @@ from unitree_rl_lab.tasks.locomotion import mdp
 PLATFORM_SIZE_X = 50.0
 PLATFORM_SIZE_Y = 50.0 # 平台尺寸，确保足够大以容纳机器人在上面运动，同时也可以调整以增加或减少运动难度
 PLATFORM_THICKNESS = 0.2 # 平台厚度，设置为0.2米以确保平台在物理模拟中具有足够的厚度，避免穿透问题，同时也不会过高以影响机器人运动的真实性
-PLATFORM_TOP_Z = 1.0 # 平台顶部的高度，设置为1.0米以提供足够的空间让机器人在平台上运动，同时也可以调整以增加或减少运动难度
+PLATFORM_TOP_Z = 5.0 # 平台顶部的高度，设置为5.0米以提供足够的空间让机器人在平台上运动，同时也可以调整以增加或减少运动难度
+PLATFORM_MOTION_FREQUENCY_HZ = 0.2
+PLATFORM_MOTION_MAX_LINEAR_ACC = 0.5
+PLATFORM_MOTION_MAX_ANGULAR_ACC = 0.05
+PLATFORM_MOTION_SAMPLE_FREQUENCY = True
+PLATFORM_MOTION_SAMPLE_LINEAR_ACC = True
+PLATFORM_MOTION_SAMPLE_ANGULAR_ACC = True
+PLATFORM_MOTION_MIN_FREQUENCY_HZ = 0.0
+PLATFORM_MOTION_MIN_LINEAR_ACC = 0.0
+PLATFORM_MOTION_MIN_ANGULAR_ACC = 0.0
+PLATFORM_MOTION_RAMP_TIME_RANGE_S = (0.3, 0.5)
+PLATFORM_MOTION_PHASE_BLEND_TIME_RANGE_S = (0.3, 0.5)
 LEG_JOINT_NAMES = [
     "left_hip_pitch_joint",
     "left_hip_roll_joint",
@@ -197,6 +208,17 @@ class EventCfg:
         mode="reset",
         params={
             "asset_cfg": SceneEntityCfg("platform"),
+            "lin_frequency_hz": PLATFORM_MOTION_FREQUENCY_HZ,
+            "max_linear_acc": PLATFORM_MOTION_MAX_LINEAR_ACC,
+            "max_angular_acc": PLATFORM_MOTION_MAX_ANGULAR_ACC,
+            "sample_frequency": PLATFORM_MOTION_SAMPLE_FREQUENCY,
+            "sample_linear_acc": PLATFORM_MOTION_SAMPLE_LINEAR_ACC,
+            "sample_angular_acc": PLATFORM_MOTION_SAMPLE_ANGULAR_ACC,
+            "min_frequency_hz": PLATFORM_MOTION_MIN_FREQUENCY_HZ,
+            "min_linear_acc": PLATFORM_MOTION_MIN_LINEAR_ACC,
+            "min_angular_acc": PLATFORM_MOTION_MIN_ANGULAR_ACC,
+            "startup_ramp_time_range_s": PLATFORM_MOTION_RAMP_TIME_RANGE_S,
+            "phase_blend_time_range_s": PLATFORM_MOTION_PHASE_BLEND_TIME_RANGE_S,
         },
     )
 
@@ -239,10 +261,18 @@ class EventCfg:
         interval_range_s=(0.02, 0.02),
         params={
             "asset_cfg": SceneEntityCfg("platform"),
-            "lin_frequency_hz": 0.2,
-            "max_linear_acc": 0.5,
+            "lin_frequency_hz": PLATFORM_MOTION_FREQUENCY_HZ,
+            "max_linear_acc": PLATFORM_MOTION_MAX_LINEAR_ACC,
             # at 4m radius (half platform size), 0.125 rad/s^2 -> 0.5 m/s^2 tangential acceleration
-            "max_angular_acc": 0.05,
+            "max_angular_acc": PLATFORM_MOTION_MAX_ANGULAR_ACC,
+            "sample_frequency": PLATFORM_MOTION_SAMPLE_FREQUENCY,
+            "sample_linear_acc": PLATFORM_MOTION_SAMPLE_LINEAR_ACC,
+            "sample_angular_acc": PLATFORM_MOTION_SAMPLE_ANGULAR_ACC,
+            "min_frequency_hz": PLATFORM_MOTION_MIN_FREQUENCY_HZ,
+            "min_linear_acc": PLATFORM_MOTION_MIN_LINEAR_ACC,
+            "min_angular_acc": PLATFORM_MOTION_MIN_ANGULAR_ACC,
+            "startup_ramp_time_range_s": PLATFORM_MOTION_RAMP_TIME_RANGE_S,
+            "phase_blend_time_range_s": PLATFORM_MOTION_PHASE_BLEND_TIME_RANGE_S,
         },# 这里设置 interval_range_s 为 (0.02, 0.02)，表示每隔 0.02 秒更新一次平台的位置，以提供连续的运动挑战；lin_frequency_hz 设置为 0.2 Hz，表示平台将以 0.2 Hz 的频率进行正弦运动；max_linear_acc 设置为 0.5 m/s^2，表示平台的线性加速度将被限制在这个值，以确保运动的平滑性和可控性；max_angular_acc 设置为 0.125 rad/s^2，表示平台的角加速度将被限制在这个值，以确保旋转运动的平滑性和可控性；如果需要更快或更慢的运动频率，可以调整 lin_frequency_hz；如果需要更强或更弱的运动幅度，可以调整 max_linear_acc 和 max_angular_acc。
     )
 
@@ -645,8 +675,8 @@ class CurriculumCfg:
     platform_motion_amplitude = CurrTerm(
         func=mdp.platform_motion_amplitude,
         params={
-            "max_linear_acc": 0.5,
-            "lin_frequency_hz": 0.2,
+            "max_linear_acc": PLATFORM_MOTION_MAX_LINEAR_ACC,
+            "lin_frequency_hz": PLATFORM_MOTION_FREQUENCY_HZ,
         },
     )# 这里设置 platform_motion_amplitude 的 func 为 mdp.platform_motion_amplitude，表示使用一个基于当前课程级别的函数来设置平台运动的加速度峰值和频率，以提供一个动态调整平台运动挑战的机制；params 中的 max_linear_acc 设置为 0.5 m/s^2，表示平台线加速度的上限；lin_frequency_hz 设置为 0.2 Hz，表示平台运动的频率；如果需要更强或更弱的运动挑战，可以调整 max_linear_acc 和 lin_frequency_hz。
 
