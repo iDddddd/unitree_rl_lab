@@ -31,6 +31,13 @@ parser.add_argument(
 )
 parser.add_argument("--real-time", action="store_true", default=False, help="Run in real-time, if possible.")
 parser.add_argument(
+    "--platform_motion_mode",
+    type=str,
+    default=None,
+    choices=["rpy", "xyz", "z_rp", "full"],
+    help="Optional fixed platform motion mode for play mode.",
+)
+parser.add_argument(
     "--platform_motion_level",
     type=int,
     default=None,
@@ -82,6 +89,7 @@ from isaaclab_tasks.utils import get_checkpoint_path
 
 import unitree_rl_lab.tasks  # noqa: F401
 from unitree_rl_lab.utils.parser_cfg import parse_env_cfg
+from unitree_rl_lab.tasks.locomotion.mdp.events import get_platform_motion_mode_max_level
 
 
 def main():
@@ -96,7 +104,11 @@ def main():
     )
 
     # Optional: fix platform motion difficulty during play instead of using curriculum progression.
-    if args_cli.platform_motion_level is not None or args_cli.platform_amp_scale is not None:
+    if (
+        args_cli.platform_motion_mode is not None
+        or args_cli.platform_motion_level is not None
+        or args_cli.platform_amp_scale is not None
+    ):
         if getattr(env_cfg, "curriculum", None) is not None:
             if hasattr(env_cfg.curriculum, "platform_motion_levels"):
                 env_cfg.curriculum.platform_motion_levels = None
@@ -126,7 +138,16 @@ def main():
     env = gym.make(args_cli.task, cfg=env_cfg, render_mode="rgb_array" if args_cli.video else None)
 
     # Apply fixed platform settings for play, if provided.
+    if args_cli.platform_motion_mode is not None:
+        env.unwrapped.platform_motion_mode = str(args_cli.platform_motion_mode)
     if args_cli.platform_motion_level is not None:
+        motion_mode = str(getattr(env.unwrapped, "platform_motion_mode", "xyz"))
+        max_level = get_platform_motion_mode_max_level(motion_mode)
+        if int(args_cli.platform_motion_level) > max_level:
+            raise ValueError(
+                f"platform_motion_level={args_cli.platform_motion_level} exceeds max level {max_level} "
+                f"for motion mode '{motion_mode}'."
+            )
         env.unwrapped.platform_motion_level = int(args_cli.platform_motion_level)
     if args_cli.platform_amp_scale is not None:
         env.unwrapped.platform_motion_amp_scale = float(min(max(args_cli.platform_amp_scale, 0.05), 1.0))
