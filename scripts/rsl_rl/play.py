@@ -50,6 +50,12 @@ parser.add_argument(
     default=None,
     help="Optional fixed platform motion amplitude scale for play mode (range: 0-1.0).",
 )
+parser.add_argument(
+    "--ekf_panel",
+    action="store_true",
+    default=False,
+    help="Open a separate realtime matplotlib panel for EKF-vs-truth curves during play.",
+)
 # append RSL-RL cli arguments
 cli_args.add_rsl_rl_args(parser)
 # append AppLauncher cli args
@@ -69,6 +75,7 @@ import gymnasium as gym
 import os
 import time
 import torch
+from collections import deque
 
 from rsl_rl.runners import OnPolicyRunner
 
@@ -83,6 +90,135 @@ from isaaclab_tasks.utils import get_checkpoint_path
 import unitree_rl_lab.tasks  # noqa: F401
 from unitree_rl_lab.utils.parser_cfg import parse_env_cfg
 from unitree_rl_lab.tasks.locomotion.mdp.events import get_platform_motion_mode_max_level
+
+try:
+    import matplotlib.pyplot as plt
+except ImportError:
+    plt = None
+
+
+class EkfRealtimePlotter:
+    """Realtime panel for comparing EKF estimates against simulator truth."""
+
+    def __init__(self, max_points: int = 200, update_every: int = 2) -> None:
+        self.max_points = max_points
+        self.update_every = update_every
+        self.step = 0
+        self.enabled = plt is not None
+        self._history = {
+            "t": deque(maxlen=max_points),
+            "pos_est": [deque(maxlen=max_points) for _ in range(3)],
+            "pos_true": [deque(maxlen=max_points) for _ in range(3)],
+            "vel_est": [deque(maxlen=max_points) for _ in range(3)],
+            "vel_true": [deque(maxlen=max_points) for _ in range(3)],
+            "pos_err": deque(maxlen=max_points),
+            "vel_err": deque(maxlen=max_points),
+            "quat_err": deque(maxlen=max_points),
+        }
+        self._fig = None
+        self._axes = None
+        self._lines = {}
+
+        if not self.enabled:
+            return
+
+        plt.ion()
+        self._fig, axes = plt.subplots(3, 1, figsize=(11, 9), sharex=True)
+        self._axes = axes
+        self._fig.canvas.manager.set_window_title("EKF Realtime Panel")
+
+        colors = ["tab:red", "tab:green", "tab:blue"]
+        labels = ["x", "y", "z"]
+
+        for i in range(3):
+            (line_pos_est,) = axes[0].plot([], [], color=colors[i], linestyle="-", label=f"pos est {labels[i]}")
+            (line_pos_true,) = axes[0].plot([], [], color=colors[i], linestyle="--", label=f"pos true {labels[i]}")
+            self._lines[f"pos_est_{i}"] = line_pos_est
+            self._lines[f"pos_true_{i}"] = line_pos_true
+
+            (line_vel_est,) = axes[1].plot([], [], color=colors[i], linestyle="-", label=f"vel est {labels[i]}")
+            (line_vel_true,) = axes[1].plot([], [], color=colors[i], linestyle="--", label=f"vel true {labels[i]}")
+            self._lines[f"vel_est_{i}"] = line_vel_est
+            self._lines[f"vel_true_{i}"] = line_vel_true
+
+        (line_pos_err,) = axes[2].plot([], [], color="tab:orange", label="pos error")
+        (line_vel_err,) = axes[2].plot([], [], color="tab:purple", label="vel error")
+        (line_quat_err,) = axes[2].plot([], [], color="tab:brown", label="quat error rad")
+        self._lines["pos_err"] = line_pos_err
+        self._lines["vel_err"] = line_vel_err
+        self._lines["quat_err"] = line_quat_err
+
+        axes[0].set_ylabel("Base Rel Pos")
+        axes[1].set_ylabel("Base Rel Vel")
+        axes[2].set_ylabel("Errors")
+        axes[2].set_xlabel("Step")
+        axes[0].grid(True, alpha=0.3)
+        axes[1].grid(True, alpha=0.3)
+        axes[2].grid(True, alpha=0.3)
+        axes[0].legend(loc="upper right", ncol=2, fontsize=8)
+        axes[1].legend(loc="upper right", ncol=2, fontsize=8)
+        axes[2].legend(loc="upper right", fontsize=8)
+        self._fig.tight_layout()
+
+    def update(self, extras: dict, step_idx: int) -> None:
+        if not self.enabled or self._fig is None or extras is None:
+            return
+        if not plt.fignum_exists(self._fig.number):
+            self.enabled = False
+            return
+
+        panel_data = extras.get("ekf_panel")
+        if not panel_data:
+            return
+
+        self._history["t"].append(step_idx)
+        for i in range(3):
+            self._history["pos_est"][i].append(float(panel_data["base_pos_rel_est"][i]))
+            self._history["pos_true"][i].append(float(panel_data["base_pos_rel_truth"][i]))
+            self._history["vel_est"][i].append(float(panel_data["base_vel_rel_est"][i]))
+            self._history["vel_true"][i].append(float(panel_data["base_vel_rel_truth"][i]))
+
+        self._history["pos_err"].append(float(panel_data["base_pos_rel_error"]))
+        self._history["vel_err"].append(float(panel_data["base_vel_rel_error"]))
+        self._history["quat_err"].append(float(panel_data["base_quat_rel_error_rad"]))
+
+        self.step += 1
+        if self.step % self.update_every != 0:
+            return
+
+        t = list(self._history["t"])
+        for i in range(3):
+            self._lines[f"pos_est_{i}"].set_data(t, list(self._history["pos_est"][i]))
+            self._lines[f"pos_true_{i}"].set_data(t, list(self._history["pos_true"][i]))
+            self._lines[f"vel_est_{i}"].set_data(t, list(self._history["vel_est"][i]))
+            self._lines[f"vel_true_{i}"].set_data(t, list(self._history["vel_true"][i]))
+
+        self._lines["pos_err"].set_data(t, list(self._history["pos_err"]))
+        self._lines["vel_err"].set_data(t, list(self._history["vel_err"]))
+        self._lines["quat_err"].set_data(t, list(self._history["quat_err"]))
+
+        env_id = int(panel_data.get("env_id", 0))
+        platform_quat_err = float(panel_data.get("platform_quat_error_rad", 0.0))
+        platform_ang_vel_err = float(panel_data.get("platform_ang_vel_error", 0.0))
+        platform_lin_acc_err = float(panel_data.get("platform_lin_acc_error", 0.0))
+        self._axes[0].set_title(
+            f"EKF vs Truth | env={env_id} | platform quat err={platform_quat_err:.3f} rad | "
+            f"ang vel err={platform_ang_vel_err:.3f} | lin acc err={platform_lin_acc_err:.3f}"
+        )
+
+        for ax in self._axes:
+            ax.relim()
+            ax.autoscale_view()
+            if t:
+                ax.set_xlim(t[0], t[-1] if t[-1] > t[0] else t[0] + 1)
+
+        self._fig.canvas.draw_idle()
+        self._fig.canvas.flush_events()
+        plt.pause(0.001)
+
+    def close(self) -> None:
+        if self.enabled and self._fig is not None and plt.fignum_exists(self._fig.number):
+            plt.close(self._fig)
 
 
 def main():
@@ -201,6 +337,12 @@ def main():
     export_policy_as_onnx(policy_nn, normalizer=normalizer, path=export_model_dir, filename="policy.onnx")
 
     dt = env.unwrapped.step_dt
+    ekf_plotter = None
+    if args_cli.ekf_panel and getattr(env_cfg, "ekf_debug_vis", False):
+        if plt is None:
+            print("[WARN] matplotlib is not available. EKF realtime panel is disabled.")
+        else:
+            ekf_plotter = EkfRealtimePlotter()
 
     # reset environment
     obs = env.get_observations()
@@ -215,12 +357,18 @@ def main():
             # agent stepping
             actions = policy(obs)
             # env stepping
-            obs, _, _, _ = env.step(actions)
+            obs, _, _, extras = env.step(actions)
+
+        if ekf_plotter is not None:
+            ekf_plotter.update(extras, timestep)
+
         if args_cli.video:
             timestep += 1
             # Exit the play loop after recording one video
             if timestep == args_cli.video_length:
                 break
+        else:
+            timestep += 1
 
         # time delay for real-time evaluation
         sleep_time = dt - (time.time() - start_time)
@@ -228,6 +376,8 @@ def main():
             time.sleep(sleep_time)
 
     # close the simulator
+    if ekf_plotter is not None:
+        ekf_plotter.close()
     env.close()
 
 

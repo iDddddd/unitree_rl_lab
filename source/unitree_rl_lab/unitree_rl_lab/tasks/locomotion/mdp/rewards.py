@@ -168,6 +168,18 @@ def joint_position_penalty(
     return torch.where(torch.logical_or(cmd > 0.0, body_vel > velocity_threshold), reward, stand_still_scale * reward)
 
 
+def action_rate_l2_bounded(
+    env: ManagerBasedRLEnv,
+    action_clip: float = 10.0,
+    reward_clip: float = 1.0e3,
+) -> torch.Tensor:
+    """Penalize action-rate with finite bounds to avoid one bad step poisoning PPO."""
+    action = torch.nan_to_num(env.action_manager.action, nan=0.0, posinf=action_clip, neginf=-action_clip)
+    prev_action = torch.nan_to_num(env.action_manager.prev_action, nan=0.0, posinf=action_clip, neginf=-action_clip)
+    delta = (action - prev_action).clamp(min=-action_clip, max=action_clip)
+    return torch.sum(torch.square(delta), dim=1).clamp(max=reward_clip)
+
+
 """
 Feet rewards.
 """

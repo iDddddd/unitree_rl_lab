@@ -68,6 +68,14 @@ def _weighted_average_quat(quats: torch.Tensor, weights: torch.Tensor, fallback:
     return quat_unique(normalize(quat))
 
 
+def _sanitize_tensor(tensor: torch.Tensor, clip: float | None = None) -> torch.Tensor:
+    """Replace non-finite values and optionally clamp magnitudes."""
+    tensor = torch.nan_to_num(tensor, nan=0.0, posinf=0.0, neginf=0.0)
+    if clip is not None:
+        tensor = torch.clamp(tensor, -clip, clip)
+    return tensor
+
+
 @dataclass
 class PlatformRelativeEKFOutput:
     """Relative robot-platform state produced by :class:`PlatformRelativeEKF`."""
@@ -129,6 +137,15 @@ class PlatformRelativeEKF:
         meas_noise_foot_vel_stance: float = 2.0e-3,
         meas_noise_foot_vel_swing: float = 5.0e-1,
         init_covariance: float = 1.0e-2,
+        covariance_jitter: float = 1.0e-6,
+        max_abs_position: float = 5.0,
+        max_abs_velocity: float = 10.0,
+        max_abs_acceleration: float = 50.0,
+        max_abs_angular_rate: float = 25.0,
+        max_abs_angular_acceleration: float = 100.0,
+        ang_acc_smoothing: float = 0.85,
+        vel_output_smoothing: float = 0.3,
+        innovation_clip: float = 1.0,
         dt: float | None = None,
     ):
         self.robot_name = robot_name
@@ -157,6 +174,15 @@ class PlatformRelativeEKF:
         self.meas_noise_foot_vel_swing = meas_noise_foot_vel_swing
 
         self.init_covariance = init_covariance
+        self.covariance_jitter = covariance_jitter
+        self.max_abs_position = max_abs_position
+        self.max_abs_velocity = max_abs_velocity
+        self.max_abs_acceleration = max_abs_acceleration
+        self.max_abs_angular_rate = max_abs_angular_rate
+        self.max_abs_angular_acceleration = max_abs_angular_acceleration
+        self.ang_acc_smoothing = ang_acc_smoothing
+        self.vel_output_smoothing = vel_output_smoothing
+        self.innovation_clip = innovation_clip
         self.dt = dt
 
         self._resolved = False
@@ -190,10 +216,12 @@ class PlatformRelativeEKF:
         self.x[env_ids, 0:3] = base_pos_rel_platform
         self.x[env_ids, 3:6] = base_vel_rel_platform
         self.x[env_ids, 6:] = foot_anchor_pos_platform.reshape(-1, 6)
+        self.x[env_ids] = self._sanitize_state(self.x[env_ids])
 
         eye = torch.eye(self.state_dim, device=self.device, dtype=self.dtype)
         self.P[env_ids] = eye.unsqueeze(0) * self.init_covariance
         self.measurement_update_mask[env_ids] = measured_contact.max(dim=-1).values > self.stance_probability_threshold
+        self.smoothed_vel_output[env_ids] = base_vel_rel_platform
         self.is_initialized[env_ids] = True
         return self._build_output(env_ids, quat_rel)
 
@@ -213,6 +241,7 @@ class PlatformRelativeEKF:
         smoothed_contact = (1.0 - self.contact_probability_smoothing) * self.contact_prob[env_ids] + (
             self.contact_probability_smoothing * measured_contact
         )
+        smoothed_contact = torch.clamp(_sanitize_tensor(smoothed_contact), 0.0, 1.0)
         self.contact_prob[env_ids] = smoothed_contact
         stance_mask = smoothed_contact > self.stance_probability_threshold
         was_stance_mask = self.prev_contact_prob[env_ids] > self.stance_probability_threshold
@@ -234,7 +263,10 @@ class PlatformRelativeEKF:
         )
         self.platform_quat_w[env_ids] = corrected_quat
         self.platform_ang_vel_w[env_ids] = fused["platform_ang_vel_w"]
-        self.platform_ang_acc_w[env_ids] = fused["platform_ang_acc_w"]
+        self.platform_ang_acc_w[env_ids] = (
+            self.ang_acc_smoothing * self.platform_ang_acc_w[env_ids]
+            + (1.0 - self.ang_acc_smoothing) * fused["platform_ang_acc_w"]
+        )
         self.platform_lin_acc_w[env_ids] = fused["platform_lin_acc_w"]
 
         kinematics = self._compute_kinematics_proxy(env_ids)
@@ -251,6 +283,9 @@ class PlatformRelativeEKF:
         platform_lin_acc_platform = quat_apply_inverse(self.platform_quat_w[env_ids], self.platform_lin_acc_w[env_ids])
         platform_ang_vel_platform = quat_apply_inverse(self.platform_quat_w[env_ids], self.platform_ang_vel_w[env_ids])
         platform_ang_acc_platform = quat_apply_inverse(self.platform_quat_w[env_ids], self.platform_ang_acc_w[env_ids])
+        platform_lin_acc_platform = _sanitize_tensor(platform_lin_acc_platform, self.max_abs_acceleration)
+        platform_ang_vel_platform = _sanitize_tensor(platform_ang_vel_platform, self.max_abs_angular_rate)
+        platform_ang_acc_platform = _sanitize_tensor(platform_ang_acc_platform, self.max_abs_angular_acceleration)
 
         rel_acc_platform = (
             base_lin_acc_platform
@@ -259,13 +294,16 @@ class PlatformRelativeEKF:
             - 2.0 * torch.cross(platform_ang_vel_platform, rel_vel, dim=-1)
             - torch.cross(platform_ang_vel_platform, torch.cross(platform_ang_vel_platform, rel_pos, dim=-1), dim=-1)
         )
+        rel_acc_platform = _sanitize_tensor(rel_acc_platform, self.max_abs_acceleration)
 
         xbar[:, 0:3] = rel_pos + dt * rel_vel + 0.5 * dt * dt * rel_acc_platform
         xbar[:, 3:6] = rel_vel + dt * rel_acc_platform
+        xbar = self._sanitize_state(xbar)
 
         A = torch.eye(self.state_dim, device=self.device, dtype=self.dtype).unsqueeze(0).repeat(env_ids.numel(), 1, 1)
         A[:, 0:3, 3:6] = torch.eye(3, device=self.device, dtype=self.dtype).unsqueeze(0) * dt
         Pbar = A @ self.P[env_ids] @ A.transpose(1, 2) + self._build_process_noise(smoothed_contact, airborne_mask, dt)
+        Pbar = self._sanitize_covariance(Pbar)
 
         if torch.any(touchdown_mask):
             xbar = self._reseed_touchdown_anchors(xbar, foot_pos_rel_platform, touchdown_mask)
@@ -286,16 +324,43 @@ class PlatformRelativeEKF:
 
             S = H_sel @ Pbar_sel @ H_sel.transpose(1, 2) + R_sel
             S = 0.5 * (S + S.transpose(1, 2))
+            eye_m = torch.eye(self.measurement_dim, device=self.device, dtype=self.dtype).unsqueeze(0)
+            S = S + eye_m * self.covariance_jitter
             PHt = Pbar_sel @ H_sel.transpose(1, 2)
-            K = torch.linalg.solve(S, PHt.transpose(1, 2)).transpose(1, 2)
-
-            xbar[update_ids] = xbar[update_ids] + (K @ innovation_sel.unsqueeze(-1)).squeeze(-1)
-            Pbar[update_ids] = Pbar_sel - K @ H_sel @ Pbar_sel
-            Pbar[update_ids] = 0.5 * (Pbar[update_ids] + Pbar[update_ids].transpose(1, 2))
+            finite_mask = (
+                torch.isfinite(S).all(dim=-1).all(dim=-1)
+                & torch.isfinite(PHt).all(dim=-1).all(dim=-1)
+                & torch.isfinite(innovation_sel).all(dim=-1)
+            )
+            if torch.any(finite_mask):
+                valid_ids = update_ids[finite_mask]
+                inn_f = innovation_sel[finite_mask]
+                if self.innovation_clip > 0.0:
+                    inn_f = torch.clamp(inn_f, -self.innovation_clip, self.innovation_clip)
+                try:
+                    K = torch.linalg.solve(S[finite_mask], PHt[finite_mask].transpose(1, 2)).transpose(1, 2)
+                    updated_state = xbar[valid_ids] + (K @ inn_f.unsqueeze(-1)).squeeze(-1)
+                    xbar[valid_ids] = self._sanitize_state(updated_state)
+                    # Joseph-form covariance update for numerical stability
+                    eye_s = torch.eye(self.state_dim, device=self.device, dtype=self.dtype).unsqueeze(0)
+                    IKH = eye_s - K @ H_sel[finite_mask]
+                    updated_cov = IKH @ Pbar_sel[finite_mask] @ IKH.transpose(1, 2) + K @ R_sel[finite_mask] @ K.transpose(1, 2)
+                    Pbar[valid_ids] = self._sanitize_covariance(updated_cov)
+                except RuntimeError:
+                    pass
 
         self.x[env_ids] = xbar
         self.P[env_ids] = Pbar
         self.prev_contact_prob[env_ids] = smoothed_contact
+
+        # Smooth velocity output to reduce noise seen by the policy
+        if self.vel_output_smoothing > 0.0:
+            raw_vel = self.x[env_ids, 3:6]
+            self.smoothed_vel_output[env_ids] = (
+                self.vel_output_smoothing * self.smoothed_vel_output[env_ids]
+                + (1.0 - self.vel_output_smoothing) * raw_vel
+            )
+
         return self._build_output(env_ids, quat_rel)
 
     def _ensure_setup(self, env: ManagerBasedRLEnv) -> None:
@@ -327,6 +392,7 @@ class PlatformRelativeEKF:
             self.prev_contact_prob = torch.zeros((env.num_envs, self.num_feet), device=self.device, dtype=self.dtype)
             self.measurement_update_mask = torch.zeros(env.num_envs, device=self.device, dtype=torch.bool)
             self.is_initialized = torch.zeros(env.num_envs, device=self.device, dtype=torch.bool)
+            self.smoothed_vel_output = torch.zeros((env.num_envs, 3), device=self.device, dtype=self.dtype)
             self._buffers_ready = True
 
     def _canonical_env_ids(self, env: ManagerBasedRLEnv, env_ids: torch.Tensor | None) -> torch.Tensor:
@@ -348,7 +414,7 @@ class PlatformRelativeEKF:
                     net_force = net_force.squeeze(1)
                 contact = (torch.linalg.norm(net_force, dim=-1) > self.contact_force_threshold).to(dtype=self.dtype)
             contacts.append(contact)
-        return torch.stack(contacts, dim=-1)
+        return torch.clamp(_sanitize_tensor(torch.stack(contacts, dim=-1)), 0.0, 1.0)
 
     def _fuse_platform_imu(self, env_ids: torch.Tensor, contact_prob: torch.Tensor) -> dict[str, torch.Tensor]:
         foot_quat_w = []
@@ -363,9 +429,9 @@ class PlatformRelativeEKF:
             foot_lin_acc_w.append(quat_apply(quat_w, sensor.data.lin_acc_b[env_ids]))
 
         foot_quat_w = torch.stack(foot_quat_w, dim=1)
-        foot_ang_vel_w = torch.stack(foot_ang_vel_w, dim=1)
-        foot_ang_acc_w = torch.stack(foot_ang_acc_w, dim=1)
-        foot_lin_acc_w = torch.stack(foot_lin_acc_w, dim=1)
+        foot_ang_vel_w = _sanitize_tensor(torch.stack(foot_ang_vel_w, dim=1), self.max_abs_angular_rate)
+        foot_ang_acc_w = _sanitize_tensor(torch.stack(foot_ang_acc_w, dim=1), self.max_abs_angular_acceleration)
+        foot_lin_acc_w = _sanitize_tensor(torch.stack(foot_lin_acc_w, dim=1), self.max_abs_acceleration)
 
         weight_sum = torch.sum(contact_prob, dim=-1, keepdim=True)
         safe_weight_sum = torch.clamp(weight_sum, min=1.0)
@@ -382,6 +448,9 @@ class PlatformRelativeEKF:
         fused_ang_vel_w = torch.where(has_contact[:, None], fused_ang_vel_w, self.platform_ang_vel_w[env_ids])
         fused_ang_acc_w = torch.where(has_contact[:, None], fused_ang_acc_w, self.platform_ang_acc_w[env_ids])
         fused_lin_acc_w = torch.where(has_contact[:, None], fused_lin_acc_w, self.platform_lin_acc_w[env_ids])
+        fused_ang_vel_w = _sanitize_tensor(fused_ang_vel_w, self.max_abs_angular_rate)
+        fused_ang_acc_w = _sanitize_tensor(fused_ang_acc_w, self.max_abs_angular_acceleration)
+        fused_lin_acc_w = _sanitize_tensor(fused_lin_acc_w, self.max_abs_acceleration)
 
         return {
             "platform_quat_w": fused_quat,
@@ -396,9 +465,15 @@ class PlatformRelativeEKF:
         base_lin_vel_w = quat_apply(base_quat_w, self._base_imu.data.lin_vel_b[env_ids])
         base_lin_acc_b = self._base_imu.data.lin_acc_b[env_ids]
         base_ang_vel_b = self._base_imu.data.ang_vel_b[env_ids]
+        base_pos_w = _sanitize_tensor(base_pos_w, self.max_abs_position * 5.0)
+        base_lin_vel_w = _sanitize_tensor(base_lin_vel_w, self.max_abs_velocity)
+        base_lin_acc_b = _sanitize_tensor(base_lin_acc_b, self.max_abs_acceleration)
+        base_ang_vel_b = _sanitize_tensor(base_ang_vel_b, self.max_abs_angular_rate)
 
         foot_pos_w = self._robot.data.body_pos_w[env_ids][:, self._foot_body_ids]
         foot_vel_w = self._robot.data.body_lin_vel_w[env_ids][:, self._foot_body_ids]
+        foot_pos_w = _sanitize_tensor(foot_pos_w, self.max_abs_position * 5.0)
+        foot_vel_w = _sanitize_tensor(foot_vel_w, self.max_abs_velocity)
 
         foot_rel_pos_w = foot_pos_w - base_pos_w[:, None, :]
         foot_rel_pos_b = _batch_quat_apply_inverse(base_quat_w, foot_rel_pos_w)
@@ -410,6 +485,8 @@ class PlatformRelativeEKF:
             foot_rel_pos_b,
             dim=-1,
         )
+        foot_rel_pos_b = _sanitize_tensor(foot_rel_pos_b, self.max_abs_position)
+        foot_rel_pos_dot_b = _sanitize_tensor(foot_rel_pos_dot_b, self.max_abs_velocity)
 
         return {
             "base_quat_w": base_quat_w,
@@ -430,11 +507,13 @@ class PlatformRelativeEKF:
         base_ang_vel_platform = quat_apply(quat_rel, kinematics["base_ang_vel_b"])
         platform_ang_vel_platform = quat_apply_inverse(self.platform_quat_w[env_ids], self.platform_ang_vel_w[env_ids])
         omega_rel_platform = base_ang_vel_platform - platform_ang_vel_platform
-        return foot_pos_dot_platform + torch.cross(
+        omega_rel_platform = _sanitize_tensor(omega_rel_platform, self.max_abs_angular_rate)
+        contact_vel = foot_pos_dot_platform + torch.cross(
             omega_rel_platform[:, None, :].expand_as(foot_pos_rel_platform),
             foot_pos_rel_platform,
             dim=-1,
         )
+        return _sanitize_tensor(contact_vel, self.max_abs_velocity)
 
     def _initialize_relative_state(
         self,
@@ -526,7 +605,7 @@ class PlatformRelativeEKF:
         )
         Q[:, 6:9, 6:9] = eye3 * anchor_noise[:, 0].view(-1, 1, 1)
         Q[:, 9:12, 9:12] = eye3 * anchor_noise[:, 1].view(-1, 1, 1)
-        return Q
+        return self._sanitize_covariance(Q)
 
     def _build_measurement_matrix(self, batch: int) -> torch.Tensor:
         H = torch.zeros((batch, self.measurement_dim, self.state_dim), device=self.device, dtype=self.dtype)
@@ -556,7 +635,7 @@ class PlatformRelativeEKF:
         yhat[:, 3:6] = base_vel_rel_platform[:, 0] + foot_vel_rel_platform[:, 0]
         yhat[:, 6:9] = base_pos_rel_platform[:, 0] + foot_pos_rel_platform[:, 1] - foot_anchor_pos_platform[:, 1]
         yhat[:, 9:12] = base_vel_rel_platform[:, 0] + foot_vel_rel_platform[:, 1]
-        return yhat
+        return _sanitize_tensor(yhat, max(self.max_abs_position, self.max_abs_velocity))
 
     def _build_measurement_noise(self, contact_prob: torch.Tensor) -> torch.Tensor:
         batch = contact_prob.shape[0]
@@ -570,27 +649,54 @@ class PlatformRelativeEKF:
         R[:, 3:6, 3:6] = eye3 * vel_noise[:, 0].view(-1, 1, 1)
         R[:, 6:9, 6:9] = eye3 * pos_noise[:, 1].view(-1, 1, 1)
         R[:, 9:12, 9:12] = eye3 * vel_noise[:, 1].view(-1, 1, 1)
-        return R
+        return self._sanitize_covariance(R)
 
     def _build_output(self, env_ids: torch.Tensor, quat_rel: torch.Tensor | None = None) -> PlatformRelativeEKFOutput:
         if quat_rel is None:
             quat_rel = quat_mul(quat_inv(self.platform_quat_w[env_ids]), self._base_imu.data.quat_w[env_ids])
 
         kinematics = self._compute_kinematics_proxy(env_ids)
+        quat_rel = _sanitize_tensor(quat_rel)
         foot_pos_rel_platform = self.x[env_ids, None, 0:3] + _batch_quat_apply(quat_rel, kinematics["foot_rel_pos_b"])
+        foot_pos_rel_platform = _sanitize_tensor(foot_pos_rel_platform, self.max_abs_position)
 
+        vel_out = (
+            self.smoothed_vel_output[env_ids]
+            if self.vel_output_smoothing > 0.0
+            else self.x[env_ids, 3:6]
+        )
         return PlatformRelativeEKFOutput(
-            base_pos_rel_platform=self.x[env_ids, 0:3],
-            base_vel_rel_platform=self.x[env_ids, 3:6],
+            base_pos_rel_platform=_sanitize_tensor(self.x[env_ids, 0:3], self.max_abs_position),
+            base_vel_rel_platform=_sanitize_tensor(vel_out, self.max_abs_velocity),
             base_quat_rel_platform=quat_rel,
-            foot_anchor_pos_platform=self.x[env_ids, 6:].reshape(-1, self.num_feet, 3),
+            foot_anchor_pos_platform=_sanitize_tensor(
+                self.x[env_ids, 6:].reshape(-1, self.num_feet, 3), self.max_abs_position
+            ),
             foot_pos_rel_platform=foot_pos_rel_platform,
-            contact_prob=self.contact_prob[env_ids],
+            contact_prob=torch.clamp(_sanitize_tensor(self.contact_prob[env_ids]), 0.0, 1.0),
             platform_quat_w_est=self.platform_quat_w[env_ids],
-            platform_ang_vel_w_est=self.platform_ang_vel_w[env_ids],
-            platform_lin_acc_w_est=self.platform_lin_acc_w[env_ids],
+            platform_ang_vel_w_est=_sanitize_tensor(self.platform_ang_vel_w[env_ids], self.max_abs_angular_rate),
+            platform_lin_acc_w_est=_sanitize_tensor(self.platform_lin_acc_w[env_ids], self.max_abs_acceleration),
             measurement_update_mask=self.measurement_update_mask[env_ids],
         )
+
+    def _sanitize_state(self, state: torch.Tensor) -> torch.Tensor:
+        """Clamp and clean EKF state values."""
+        state = _sanitize_tensor(state)
+        state[:, 0:3] = _sanitize_tensor(state[:, 0:3], self.max_abs_position)
+        state[:, 3:6] = _sanitize_tensor(state[:, 3:6], self.max_abs_velocity)
+        state[:, 6:] = _sanitize_tensor(state[:, 6:], self.max_abs_position)
+        return state
+
+    def _sanitize_covariance(self, cov: torch.Tensor) -> torch.Tensor:
+        """Symmetrize, clean and lightly regularize covariance-like matrices."""
+        cov = _sanitize_tensor(cov, 1.0e6)
+        cov = 0.5 * (cov + cov.transpose(1, 2))
+        eye = torch.eye(cov.shape[-1], device=cov.device, dtype=cov.dtype).unsqueeze(0)
+        diag = torch.diagonal(cov, dim1=-2, dim2=-1)
+        diag = torch.clamp(_sanitize_tensor(diag), min=self.covariance_jitter, max=1.0e6)
+        cov = cov - torch.diag_embed(torch.diagonal(cov, dim1=-2, dim2=-1)) + torch.diag_embed(diag)
+        return cov + eye * self.covariance_jitter
 
 
 # Backward-compatible alias for older experiments that imported the previous name.

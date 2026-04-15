@@ -316,24 +316,27 @@ class ObservationsCfg:
         """Observations for policy group."""
 
         # observation terms (order preserved)
-        base_ang_vel = ObsTerm(func=mdp.base_ang_vel, scale=0.2, noise=Unoise(n_min=-0.2, n_max=0.2)) # 机器人基座角速度观测，添加噪声以增加训练的鲁棒性；scale 设置为 0.2 以缩放观测值，noise 设置为 Uniform(-0.2, 0.2) 以提供适度的观测噪声，帮助训练更好地适应平台运动的挑战；如果需要更精确或更嘈杂的观测，可以调整 scale 和 noise。
-        projected_gravity = ObsTerm(func=mdp.projected_gravity, noise=Unoise(n_min=-0.05, n_max=0.05)) # 机器人重力投影观测，添加噪声以增加训练的鲁棒性；noise 设置为 Uniform(-0.05, 0.05) 以提供适度的观测噪声，帮助训练更好地适应平台运动的挑战；如果需要更精确或更嘈杂的观测，可以调整 noise。
+        base_ang_vel = ObsTerm(func=mdp.base_ang_vel, scale=0.2, clip=(-20.0, 20.0), noise=Unoise(n_min=-0.2, n_max=0.2)) # 机器人基座角速度观测，添加噪声以增加训练的鲁棒性；scale 设置为 0.2 以缩放观测值，noise 设置为 Uniform(-0.2, 0.2) 以提供适度的观测噪声，帮助训练更好地适应平台运动的挑战；如果需要更精确或更嘈杂的观测，可以调整 scale 和 noise。
+        projected_gravity = ObsTerm(func=mdp.projected_gravity, clip=(-5.0, 5.0), noise=Unoise(n_min=-0.05, n_max=0.05)) # 机器人重力投影观测，添加噪声以增加训练的鲁棒性；noise 设置为 Uniform(-0.05, 0.05) 以提供适度的观测噪声，帮助训练更好地适应平台运动的挑战；如果需要更精确或更嘈杂的观测，可以调整 noise。
         ekf_base_pos_rel_platform = ObsTerm(
             func=mdp.ekf_base_pos_rel_platform,
+            clip=(-5.0, 5.0),
             noise=Unoise(n_min=-0.02, n_max=0.02),
         ) # EKF 估计的机身相对平台位置观测。
         ekf_base_vel_rel_platform = ObsTerm(
             func=mdp.ekf_base_vel_rel_platform,
+            clip=(-10.0, 10.0),
             noise=Unoise(n_min=-0.05, n_max=0.05),
         ) # EKF 估计的机身相对平台速度观测。
         ekf_base_quat_rel_platform = ObsTerm(
             func=mdp.ekf_base_quat_rel_platform,
+            clip=(-1.0, 1.0),
             noise=Unoise(n_min=-0.01, n_max=0.01),
         ) # EKF 估计的机身相对平台姿态观测。
-        velocity_commands = ObsTerm(func=mdp.generated_commands, params={"command_name": "base_velocity"}) # 机器人当前速度命令观测，直接使用生成的命令作为观测项，以提供清晰的目标信息，帮助训练更好地适应平台运动的挑战；如果需要更复杂的命令表示，可以添加额外的处理或特征提取。
-        joint_pos_rel = ObsTerm(func=mdp.joint_pos_rel, noise=Unoise(n_min=-0.01, n_max=0.01)) # 机器人关节位置相对观测，添加噪声以增加训练的鲁棒性；noise 设置为 Uniform(-0.01, 0.01) 以提供适度的观测噪声，帮助训练更好地适应平台运动的挑战；如果需要更精确或更嘈杂的观测，可以调整 noise。
-        joint_vel_rel = ObsTerm(func=mdp.joint_vel_rel, scale=0.05, noise=Unoise(n_min=-1.5, n_max=1.5)) # 机器人关节速度相对观测，添加噪声以增加训练的鲁棒性；scale 设置为 0.05 以缩放观测值，noise 设置为 Uniform(-1.5, 1.5) 以提供较大的观测噪声，帮助训练更好地适应平台运动的挑战；如果需要更精确或更嘈杂的观测，可以调整 scale 和 noise。
-        last_action = ObsTerm(func=mdp.last_action) # 机器人最后执行的动作观测，用于提供动作历史信息，帮助训练更好地适应平台运动的挑战；如果需要更复杂的动作历史表示，可以添加额外的处理或特征提取。
+        velocity_commands = ObsTerm(func=mdp.generated_commands, clip=(-5.0, 5.0), params={"command_name": "base_velocity"}) # 机器人当前速度命令观测，直接使用生成的命令作为观测项，以提供清晰的目标信息，帮助训练更好地适应平台运动的挑战；如果需要更复杂的命令表示，可以添加额外的处理或特征提取。
+        joint_pos_rel = ObsTerm(func=mdp.joint_pos_rel, clip=(-10.0, 10.0), noise=Unoise(n_min=-0.01, n_max=0.01)) # 机器人关节位置相对观测，添加噪声以增加训练的鲁棒性；noise 设置为 Uniform(-0.01, 0.01) 以提供适度的观测噪声，帮助训练更好地适应平台运动的挑战；如果需要更精确或更嘈杂的观测，可以调整 noise。
+        joint_vel_rel = ObsTerm(func=mdp.joint_vel_rel, scale=0.05, clip=(-20.0, 20.0), noise=Unoise(n_min=-1.5, n_max=1.5)) # 机器人关节速度相对观测，添加噪声以增加训练的鲁棒性；scale 设置为 0.05 以缩放观测值，noise 设置为 Uniform(-1.5, 1.5) 以提供较大的观测噪声，帮助训练更好地适应平台运动的挑战；如果需要更精确或更嘈杂的观测，可以调整 scale 和 noise。
+        last_action = ObsTerm(func=mdp.last_action, clip=(-10.0, 10.0)) # 机器人最后执行的动作观测，用于提供动作历史信息，帮助训练更好地适应平台运动的挑战；如果需要更复杂的动作历史表示，可以添加额外的处理或特征提取。
         # gait_phase = ObsTerm(func=mdp.gait_phase, params={"period": 0.8}) # 机器人步态相位观测，基于一个周期为 0.8 秒的正弦函数计算步态相位，以提供关于机器人运动周期的信息，帮助训练更好地适应平台运动的挑战；如果需要更复杂的步态表示，可以添加额外的处理或特征提取。
 
         def __post_init__(self):
@@ -348,23 +351,45 @@ class ObservationsCfg:
     class CriticCfg(ObsGroup):
         """Observations for critic group."""
 
-        base_lin_vel = ObsTerm(func=mdp.base_lin_vel) # 机器人基座线速度观测
-        base_ang_vel = ObsTerm(func=mdp.base_ang_vel, scale=0.2) # 机器人基座角速度观测
+        base_lin_vel = ObsTerm(func=mdp.base_lin_vel, clip=(-20.0, 20.0)) # 机器人基座线速度观测
+        base_ang_vel = ObsTerm(func=mdp.base_ang_vel, scale=0.2, clip=(-20.0, 20.0)) # 机器人基座角速度观测
         platform_body_vel_deltas = ObsTerm(
             func=mdp.platform_body_vel_deltas_b,
+            clip=(-20.0, 20.0),
             params={
                 "robot_asset_cfg": SceneEntityCfg("robot"),
                 "platform_asset_cfg": SceneEntityCfg("platform"),
             },
         ) # critic 额外特权观测：平台-机体相对速度 [v_xy^B, w_z^B]，用于稳定价值估计。
-        ekf_base_pos_rel_platform = ObsTerm(func=mdp.ekf_base_pos_rel_platform) # EKF 估计的机身相对平台位置观测。
-        ekf_base_vel_rel_platform = ObsTerm(func=mdp.ekf_base_vel_rel_platform) # EKF 估计的机身相对平台速度观测。
-        ekf_base_quat_rel_platform = ObsTerm(func=mdp.ekf_base_quat_rel_platform) # EKF 估计的机身相对平台姿态观测。
-        projected_gravity = ObsTerm(func=mdp.projected_gravity) # 机器人重力投影观测
-        velocity_commands = ObsTerm(func=mdp.generated_commands, params={"command_name": "base_velocity"}) # 机器人当前速度命令观测
-        joint_pos_rel = ObsTerm(func=mdp.joint_pos_rel) # 机器人关节位置相对观测
-        joint_vel_rel = ObsTerm(func=mdp.joint_vel_rel, scale=0.05) # 机器人关节速度相对观测
-        last_action = ObsTerm(func=mdp.last_action) # 机器人最后执行的动作观测
+        ekf_base_pos_rel_platform = ObsTerm(
+            func=mdp.gt_base_pos_rel_platform,
+            clip=(-5.0, 5.0),
+            params={
+                "robot_asset_cfg": SceneEntityCfg("robot"),
+                "platform_asset_cfg": SceneEntityCfg("platform"),
+            },
+        ) # 特权真值：机身相对平台位置（平台坐标系）。
+        ekf_base_vel_rel_platform = ObsTerm(
+            func=mdp.gt_base_vel_rel_platform,
+            clip=(-10.0, 10.0),
+            params={
+                "robot_asset_cfg": SceneEntityCfg("robot"),
+                "platform_asset_cfg": SceneEntityCfg("platform"),
+            },
+        ) # 特权真值：机身相对平台速度（平台坐标系）。
+        ekf_base_quat_rel_platform = ObsTerm(
+            func=mdp.gt_base_quat_rel_platform,
+            clip=(-1.0, 1.0),
+            params={
+                "robot_asset_cfg": SceneEntityCfg("robot"),
+                "platform_asset_cfg": SceneEntityCfg("platform"),
+            },
+        ) # 特权真值：机身相对平台姿态四元数。
+        projected_gravity = ObsTerm(func=mdp.projected_gravity, clip=(-5.0, 5.0)) # 机器人重力投影观测
+        velocity_commands = ObsTerm(func=mdp.generated_commands, clip=(-5.0, 5.0), params={"command_name": "base_velocity"}) # 机器人当前速度命令观测
+        joint_pos_rel = ObsTerm(func=mdp.joint_pos_rel, clip=(-10.0, 10.0)) # 机器人关节位置相对观测
+        joint_vel_rel = ObsTerm(func=mdp.joint_vel_rel, scale=0.05, clip=(-20.0, 20.0)) # 机器人关节速度相对观测
+        last_action = ObsTerm(func=mdp.last_action, clip=(-10.0, 10.0)) # 机器人最后执行的动作观测
         # gait_phase = ObsTerm(func=mdp.gait_phase, params={"period": 0.8})
         # height_scanner = ObsTerm(func=mdp.height_scan,
         #     params={"sensor_cfg": SceneEntityCfg("height_scanner")},
@@ -412,7 +437,11 @@ class RewardsCfg:
     ) # 新增：惩罚平台与机体相对速度误差，强化对外界扰动的鲁棒性。
     joint_vel = RewTerm(func=mdp.joint_vel_l2, weight=-0.001) # 机器人关节速度奖励，使用基于关节速度的 L2 奖励函数，以提供一个关于机器人动作平滑性的奖励信号，帮助训练更好地适应平台运动的挑战；weight 设置为 -0.001，表示这个奖励项在总奖励中的权重较低，并且是一个惩罚项，以鼓励机器人保持较低的关节速度；如果需要更强或更弱的惩罚信号，可以调整 weight。
     joint_acc = RewTerm(func=mdp.joint_acc_l2, weight=-2.5e-7) # 机器人关节加速度奖励，使用基于关节加速度的 L2 奖励函数，以提供一个关于机器人动作平滑性的奖励信号，帮助训练更好地适应平台运动的挑战；weight 设置为 -2.5e-7，表示这个奖励项在总奖励中的权重非常低，并且是一个惩罚项，以鼓励机器人保持较低的关节加速度；如果需要更强或更弱的惩罚信号，可以调整 weight。
-    action_rate = RewTerm(func=mdp.action_rate_l2, weight=-0.03) # 适当放松动作变化率惩罚，减少策略因“少动更安全”导致的追步/并步局部最优。
+    action_rate = RewTerm(
+        func=mdp.action_rate_l2_bounded,
+        weight=-0.03,
+        params={"action_clip": 10.0, "reward_clip": 1.0e3},
+    ) # 有界的动作变化率惩罚，避免单个坏 step 产生极端尖峰并污染 PPO 更新。
     dof_pos_limits = RewTerm(func=mdp.joint_pos_limits, weight=-5.0) # 机器人关节位置限制奖励，使用基于关节位置限制的奖励函数，以提供一个关于机器人动作可行性的奖励信号，帮助训练更好地适应平台运动的挑战；weight 设置为 -5.0，表示这个奖励项在总奖励中的权重较高，并且是一个惩罚项，以鼓励机器人保持在关节位置限制范围内；如果需要更强或更弱的惩罚信号，可以调整 weight。
     energy = RewTerm(func=mdp.energy, weight=-2e-5) # 机器人能量奖励，使用基于能量的奖励函数，以提供一个关于机器人效率的奖励信号，帮助训练更好地适应平台运动的挑战；weight 设置为 -2e-5，表示这个奖励项在总奖励中的权重较低，并且是一个惩罚项，以鼓励机器人保持较低的能量消耗；如果需要更强或更弱的惩罚信号，可以调整 weight。
 

@@ -157,11 +157,27 @@ def _update_platform_relative_ekf_debug(
     env.extras["log"]["EKF/platform_ang_vel_error"] = platform_ang_vel_error.mean()
     env.extras["log"]["EKF/platform_lin_acc_error"] = platform_lin_acc_error.mean()
 
+    env_id = int(getattr(env.cfg, "ekf_debug_env_id", 0))
+    env_id = max(0, min(env.num_envs - 1, env_id))
+    env.extras["ekf_panel"] = {
+        "env_id": env_id,
+        "base_pos_rel_est": output.base_pos_rel_platform[env_id].detach().cpu().clone(),
+        "base_pos_rel_truth": base_pos_rel_truth[env_id].detach().cpu().clone(),
+        "base_vel_rel_est": output.base_vel_rel_platform[env_id].detach().cpu().clone(),
+        "base_vel_rel_truth": base_vel_rel_truth[env_id].detach().cpu().clone(),
+        "base_quat_rel_est": output.base_quat_rel_platform[env_id].detach().cpu().clone(),
+        "base_quat_rel_truth": base_quat_rel_truth[env_id].detach().cpu().clone(),
+        "base_pos_rel_error": pos_error[env_id].detach().cpu().clone(),
+        "base_vel_rel_error": vel_error[env_id].detach().cpu().clone(),
+        "base_quat_rel_error_rad": quat_error[env_id].detach().cpu().clone(),
+        "platform_quat_error_rad": platform_quat_error[env_id].detach().cpu().clone(),
+        "platform_ang_vel_error": platform_ang_vel_error[env_id].detach().cpu().clone(),
+        "platform_lin_acc_error": platform_lin_acc_error[env_id].detach().cpu().clone(),
+    }
+
     if cache["visualizer"] is None:
         cache["visualizer"] = VisualizationMarkers(_EKF_DEBUG_MARKERS_CFG)
 
-    env_id = int(getattr(env.cfg, "ekf_debug_env_id", 0))
-    env_id = max(0, min(env.num_envs - 1, env_id))
     base_pos_est_w = platform_pos_w + quat_apply(platform_quat_est, output.base_pos_rel_platform - cache["debug_origin_offset"])
     marker_positions = torch.stack((base_pos_est_w[env_id], base_pos_w[env_id]), dim=0)
     marker_indices = torch.tensor([0, 1], device=env.device, dtype=torch.int32)
@@ -204,14 +220,62 @@ def platform_body_vel_deltas_b(
 
 def ekf_base_pos_rel_platform(env: ManagerBasedRLEnv) -> torch.Tensor:
     """Estimated robot base position relative to the platform-attached EKF frame."""
-    return _get_platform_relative_ekf_output(env).base_pos_rel_platform
+    return torch.nan_to_num(_get_platform_relative_ekf_output(env).base_pos_rel_platform, nan=0.0, posinf=0.0, neginf=0.0)
 
 
 def ekf_base_vel_rel_platform(env: ManagerBasedRLEnv) -> torch.Tensor:
     """Estimated robot base velocity relative to the platform-attached EKF frame."""
-    return _get_platform_relative_ekf_output(env).base_vel_rel_platform
+    return torch.nan_to_num(_get_platform_relative_ekf_output(env).base_vel_rel_platform, nan=0.0, posinf=0.0, neginf=0.0)
 
 
 def ekf_base_quat_rel_platform(env: ManagerBasedRLEnv) -> torch.Tensor:
     """Estimated robot base orientation relative to the platform-attached EKF frame."""
-    return _get_platform_relative_ekf_output(env).base_quat_rel_platform
+    return torch.nan_to_num(_get_platform_relative_ekf_output(env).base_quat_rel_platform, nan=0.0, posinf=0.0, neginf=0.0)
+
+
+# ---------------------------------------------------------------------------
+# Privileged ground-truth variants (for critic only)
+# ---------------------------------------------------------------------------
+
+def gt_base_pos_rel_platform(
+    env: ManagerBasedRLEnv,
+    robot_asset_cfg: SceneEntityCfg = SceneEntityCfg("robot"),
+    platform_asset_cfg: SceneEntityCfg = SceneEntityCfg("platform"),
+) -> torch.Tensor:
+    """Privileged: true robot base position relative to platform, expressed in platform frame."""
+    robot: RigidObject = env.scene[robot_asset_cfg.name]
+    platform: RigidObject = env.scene[platform_asset_cfg.name]
+    r_rel_w = robot.data.root_pos_w - platform.data.root_pos_w
+    pos_rel = quat_apply_inverse(platform.data.root_quat_w, r_rel_w)
+    return torch.nan_to_num(pos_rel, nan=0.0, posinf=0.0, neginf=0.0)
+
+
+def gt_base_vel_rel_platform(
+    env: ManagerBasedRLEnv,
+    robot_asset_cfg: SceneEntityCfg = SceneEntityCfg("robot"),
+    platform_asset_cfg: SceneEntityCfg = SceneEntityCfg("platform"),
+) -> torch.Tensor:
+    """Privileged: true robot base velocity relative to platform, expressed in platform frame."""
+    robot: RigidObject = env.scene[robot_asset_cfg.name]
+    platform: RigidObject = env.scene[platform_asset_cfg.name]
+    r_rel_w = robot.data.root_pos_w - platform.data.root_pos_w
+    # Transport theorem: v_rel = v_base - v_platform - omega_platform × r_rel
+    v_rel_w = (
+        robot.data.root_lin_vel_w
+        - platform.data.root_lin_vel_w
+        - torch.cross(platform.data.root_ang_vel_w, r_rel_w, dim=-1)
+    )
+    vel_rel = quat_apply_inverse(platform.data.root_quat_w, v_rel_w)
+    return torch.nan_to_num(vel_rel, nan=0.0, posinf=0.0, neginf=0.0)
+
+
+def gt_base_quat_rel_platform(
+    env: ManagerBasedRLEnv,
+    robot_asset_cfg: SceneEntityCfg = SceneEntityCfg("robot"),
+    platform_asset_cfg: SceneEntityCfg = SceneEntityCfg("platform"),
+) -> torch.Tensor:
+    """Privileged: true robot base orientation relative to platform."""
+    robot: RigidObject = env.scene[robot_asset_cfg.name]
+    platform: RigidObject = env.scene[platform_asset_cfg.name]
+    quat_rel = quat_mul(quat_inv(platform.data.root_quat_w), robot.data.root_quat_w)
+    return torch.nan_to_num(quat_rel, nan=0.0, posinf=0.0, neginf=0.0)
