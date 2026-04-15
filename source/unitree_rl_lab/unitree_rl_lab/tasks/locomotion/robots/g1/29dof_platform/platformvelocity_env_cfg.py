@@ -408,9 +408,14 @@ class RewardsCfg:
     # 这里定义了多个奖励项，涵盖了任务目标、机器人状态、足部接触等方面，以提供一个综合的奖励信号，帮助训练更好地适应平台运动的挑战；如果需要更简单或更复杂的奖励结构，可以调整这些奖励项。
     # -- task
     track_lin_vel_xy = RewTerm(
-        func=mdp.track_lin_vel_xy_yaw_frame_exp,
+        func=mdp.track_lin_vel_xy_platform_frame_exp,
         weight=2.0,
-        params={"command_name": "base_velocity", "std": math.sqrt(0.25)},
+        params={
+            "command_name": "base_velocity",
+            "std": math.sqrt(0.25),
+            "robot_asset_cfg": SceneEntityCfg("robot"),
+            "platform_asset_cfg": SceneEntityCfg("platform"),
+        },
     )# 这里设置 track_lin_vel_xy 的 func 为 mdp.track_lin_vel_xy_yaw_frame_exp，表示使用基于机器人朝向的线速度跟踪奖励函数，以提供更准确的速度跟踪信号，帮助训练更好地适应平台运动的挑战；weight 设置为 1.0，表示这个奖励项在总奖励中的权重较高，以强调任务目标的重要性；params 中的 command_name 设置为 "base_velocity"，表示这个奖励项将跟踪 base_velocity 命令；std 设置为 sqrt(0.25)，表示奖励函数中的误差将被缩放为原来的 0.5，以提供适度的奖励信号，帮助训练更好地适应平台运动的挑战；如果需要更强或更弱的奖励信号，可以调整 weight 和 std。
     track_ang_vel_z = RewTerm(
         func=mdp.track_ang_vel_z_exp, weight=1.0, params={"command_name": "base_velocity", "std": math.sqrt(0.25)}
@@ -510,11 +515,12 @@ class RewardsCfg:
         },
     ) # 机器人足部步态奖励，使用基于足部接触模式的奖励函数，以提供一个关于机器人步态协调性的奖励信号，帮助训练更好地适应平台运动的挑战；weight 设置为 0.5，表示这个奖励项在总奖励中的权重较高，以强调步态协调的重要性；params 中的 period 设置为 0.8 秒，表示步态周期；offset 设置为 [0.0, 0.5]，表示两个足部的相位偏移；threshold 设置为 0.55，表示接触力的阈值；command_name 设置为 "base_velocity"，表示这个奖励项将根据 base_velocity 命令进行计算；sensor_cfg 使用正则表达式选择了所有包含 "ankle_roll" 的接触力传感器，以专注于足部接触信息；如果需要更强或更弱的奖励信号，可以调整 weight；如果需要调整步态参数，可以修改 params 中的值。
     feet_slide = RewTerm(
-        func=mdp.feet_slide,
+        func=mdp.feet_slide_rel_platform,
         weight=-0.2,
         params={
             "asset_cfg": SceneEntityCfg("robot", body_names=".*ankle_roll.*"),
             "sensor_cfg": SceneEntityCfg("contact_forces", body_names=".*ankle_roll.*"),
+            "platform_asset_cfg": SceneEntityCfg("platform"),
         },
     ) # 机器人足部滑动奖励，使用基于足部滑动的奖励函数，以提供一个关于机器人足部稳定性的奖励信号，帮助训练更好地适应平台运动的挑战；weight 设置为 -0.2，表示这个奖励项在总奖励中的权重较低，并且是一个惩罚项，以鼓励机器人减少足部滑动；params 中的 asset_cfg 使用正则表达式选择了所有包含 "ankle_roll" 的身体部件，以专注于足部信息；sensor_cfg 使用正则表达式选择了所有包含 "ankle_roll" 的接触力传感器，以专注于足部接触信息；如果需要更强或更弱的惩罚信号，可以调整 weight；如果需要调整关注的身体部件或传感器，可以修改相应的正则表达式。
     feet_clearance = RewTerm(
@@ -556,11 +562,25 @@ class TerminationsCfg:
 
     # 终止2：机器人身体高度过低（跌倒或贴地）时结束。
     # params.minimum_height: 机器人根关节高度阈值，低于就认为倒地。
-    base_height = DoneTerm(func=mdp.root_height_below_minimum, params={"minimum_height": 0.2})
+    base_height = DoneTerm(
+        func=mdp.root_height_below_minimum_rel_platform,
+        params={
+            "minimum_height": 0.2,
+            "robot_asset_cfg": SceneEntityCfg("robot"),
+            "platform_asset_cfg": SceneEntityCfg("platform"),
+        },
+    )
 
     # 终止3：机器人倾斜角过大时结束。
     # params.limit_angle: 机器人根关节与垂直方向夹角阈值（rad）。
-    bad_orientation = DoneTerm(func=mdp.bad_orientation, params={"limit_angle": 0.8})
+    bad_orientation = DoneTerm(
+        func=mdp.bad_orientation_rel_platform,
+        params={
+            "limit_angle": 0.8,
+            "robot_asset_cfg": SceneEntityCfg("robot"),
+            "platform_asset_cfg": SceneEntityCfg("platform"),
+        },
+    )
 
     # 终止4：机器人脱离平台边界时结束。
     # 1) func：mdp.outside_platform_bounds 计算与平台中心的平移距离是否超出半边长+margin。

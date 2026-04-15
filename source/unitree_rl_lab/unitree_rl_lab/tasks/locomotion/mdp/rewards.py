@@ -365,3 +365,69 @@ def joint_mirror(env: ManagerBasedRLEnv, asset_cfg: SceneEntityCfg, mirror_joint
         )
     reward *= 1 / len(mirror_joints) if len(mirror_joints) > 0 else 0
     return reward
+
+
+"""
+Platform-relative rewards.
+"""
+
+
+def track_lin_vel_xy_platform_frame_exp(
+    env: ManagerBasedRLEnv,
+    std: float,
+    command_name: str = "base_velocity",
+    robot_asset_cfg: SceneEntityCfg = SceneEntityCfg("robot"),
+    platform_asset_cfg: SceneEntityCfg = SceneEntityCfg("platform"),
+) -> torch.Tensor:
+    """Track commanded xy velocity in the platform yaw frame.
+
+    The robot's velocity relative to the platform is projected onto the
+    platform's yaw-only orientation so that platform translation does not
+    appear as a tracking error.
+    """
+    robot: RigidObject = env.scene[robot_asset_cfg.name]
+    platform: RigidObject = env.scene[platform_asset_cfg.name]
+
+    # Relative velocity in world frame
+    rel_vel_w = robot.data.root_lin_vel_w[:, :3] - platform.data.root_lin_vel_w[:, :3]
+    # Project to robot yaw frame (commands are in robot body yaw frame)
+    from isaaclab.utils.math import yaw_quat
+    robot_yaw_quat = yaw_quat(robot.data.root_quat_w)
+    rel_vel_yaw = quat_apply_inverse(robot_yaw_quat, rel_vel_w)
+
+    cmd = env.command_manager.get_command(command_name)
+    lin_vel_error = torch.sum(torch.square(cmd[:, :2] - rel_vel_yaw[:, :2]), dim=1)
+    return torch.exp(-lin_vel_error / std**2)
+
+
+def feet_slide_rel_platform(
+    env: ManagerBasedRLEnv,
+    sensor_cfg: SceneEntityCfg,
+    asset_cfg: SceneEntityCfg = SceneEntityCfg("robot"),
+    platform_asset_cfg: SceneEntityCfg = SceneEntityCfg("platform"),
+) -> torch.Tensor:
+    """Penalize foot sliding relative to the platform surface.
+
+    Standard feet_slide uses world-frame foot velocity, which incorrectly
+    penalizes the foot for "moving" when the platform translates.  This
+    version subtracts the platform velocity first.
+    """
+    contact_sensor: ContactSensor = env.scene.sensors[sensor_cfg.name]
+    asset: RigidObject = env.scene[asset_cfg.name]
+    platform: RigidObject = env.scene[platform_asset_cfg.name]
+
+    # Detect contacts (same logic as built-in feet_slide)
+    contacts = (
+        contact_sensor.data.net_forces_w_history[:, :, sensor_cfg.body_ids, :]
+        .norm(dim=-1)
+        .max(dim=1)[0]
+        > 1.0
+    )
+
+    # Foot velocity relative to platform in world frame, xy only
+    foot_vel_w = asset.data.body_lin_vel_w[:, asset_cfg.body_ids, :2]
+    platform_vel_xy = platform.data.root_lin_vel_w[:, :2].unsqueeze(1)
+    rel_foot_vel_xy = foot_vel_w - platform_vel_xy
+
+    reward = torch.sum(rel_foot_vel_xy.norm(dim=-1) * contacts, dim=1)
+    return reward

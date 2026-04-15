@@ -126,15 +126,15 @@ class PlatformRelativeEKF:
         stance_probability_threshold: float = 0.5,
         attitude_correction_gain: float = 0.15,
         process_noise_rel_pos: float = 1.0e-3,
-        process_noise_rel_vel: float = 4.0e-2,
+        process_noise_rel_vel: float = 1.5e-1,
         process_noise_rel_pos_airborne: float = 1.0e-2,
-        process_noise_rel_vel_airborne: float = 4.0e-1,
+        process_noise_rel_vel_airborne: float = 5.0e-1,
         process_noise_anchor_stance: float = 1.0e-5,
         process_noise_anchor_swing: float = 5.0e-2,
         process_noise_anchor_airborne: float = 2.5e-1,
         meas_noise_foot_pos_stance: float = 2.0e-4,
         meas_noise_foot_pos_swing: float = 2.0e-1,
-        meas_noise_foot_vel_stance: float = 2.0e-3,
+        meas_noise_foot_vel_stance: float = 3.0e-2,
         meas_noise_foot_vel_swing: float = 5.0e-1,
         init_covariance: float = 1.0e-2,
         covariance_jitter: float = 1.0e-6,
@@ -279,21 +279,31 @@ class PlatformRelativeEKF:
         rel_pos = x_prev[:, 0:3]
         rel_vel = x_prev[:, 3:6]
 
-        base_lin_acc_platform = _batch_quat_apply(quat_rel, kinematics["base_lin_acc_b"])
-        platform_lin_acc_platform = quat_apply_inverse(self.platform_quat_w[env_ids], self.platform_lin_acc_w[env_ids])
-        platform_ang_vel_platform = quat_apply_inverse(self.platform_quat_w[env_ids], self.platform_ang_vel_w[env_ids])
-        platform_ang_acc_platform = quat_apply_inverse(self.platform_quat_w[env_ids], self.platform_ang_acc_w[env_ids])
-        platform_lin_acc_platform = _sanitize_tensor(platform_lin_acc_platform, self.max_abs_acceleration)
-        platform_ang_vel_platform = _sanitize_tensor(platform_ang_vel_platform, self.max_abs_angular_rate)
-        platform_ang_acc_platform = _sanitize_tensor(platform_ang_acc_platform, self.max_abs_angular_acceleration)
+        # --- Gravity-safe relative acceleration ---
+        # IMU lin_acc_b is specific force (includes gravity): a_b = a_true + R^T g
+        # To get correct cancellation, rotate both accelerations to platform frame
+        # using the SAME quaternion (platform_quat_w), so gravity terms cancel exactly.
+        base_quat_w = kinematics["base_quat_w"]
+        base_lin_acc_w = quat_apply(base_quat_w, kinematics["base_lin_acc_b"])
+        platform_lin_acc_w = self.platform_lin_acc_w[env_ids]
+        # Both contain gravity in world frame -> subtraction cancels it
+        diff_lin_acc_w = base_lin_acc_w - platform_lin_acc_w
+        # Rotate the gravity-free difference into platform frame
+        platform_quat = self.platform_quat_w[env_ids]
+        rel_acc_platform = quat_apply_inverse(platform_quat, diff_lin_acc_w)
+        rel_acc_platform = _sanitize_tensor(rel_acc_platform, self.max_abs_acceleration)
 
-        rel_acc_platform = (
-            base_lin_acc_platform
-            - platform_lin_acc_platform
-            - torch.cross(platform_ang_acc_platform, rel_pos, dim=-1)
-            - 2.0 * torch.cross(platform_ang_vel_platform, rel_vel, dim=-1)
-            - torch.cross(platform_ang_vel_platform, torch.cross(platform_ang_vel_platform, rel_pos, dim=-1), dim=-1)
+        # Coriolis term: -2 * omega_plat × v_rel (kept, low noise)
+        platform_ang_vel_platform = quat_apply_inverse(platform_quat, self.platform_ang_vel_w[env_ids])
+        platform_ang_vel_platform = _sanitize_tensor(platform_ang_vel_platform, self.max_abs_angular_rate)
+        rel_acc_platform = rel_acc_platform - 2.0 * torch.cross(platform_ang_vel_platform, rel_vel, dim=-1)
+        # Centrifugal: -omega × (omega × r) (kept, quadratic in omega so small)
+        rel_acc_platform = rel_acc_platform - torch.cross(
+            platform_ang_vel_platform, torch.cross(platform_ang_vel_platform, rel_pos, dim=-1), dim=-1
         )
+        # NOTE: Euler force (-alpha × r) is intentionally omitted.
+        # ang_acc from IMU finite-differencing is too noisy and was the main source of
+        # velocity estimation spikes. Its effect is absorbed by the increased process_noise_rel_vel.
         rel_acc_platform = _sanitize_tensor(rel_acc_platform, self.max_abs_acceleration)
 
         xbar[:, 0:3] = rel_pos + dt * rel_vel + 0.5 * dt * dt * rel_acc_platform
