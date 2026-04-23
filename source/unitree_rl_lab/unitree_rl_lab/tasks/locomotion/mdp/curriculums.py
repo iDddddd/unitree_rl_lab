@@ -279,10 +279,10 @@ def platform_reward_weight_schedule(
         weights = {
             "track_lin_vel_xy": 2.0,
             "track_ang_vel_z": 1.0,
-            "base_linear_velocity": _lerp(-1.0, -0.2, relax),
+            "base_linear_velocity": _lerp(-1.0, -0.4, relax),
             "base_angular_velocity": _lerp(-0.05, -0.02, relax),
             "flat_orientation_l2": _lerp(-2.0, -1.0, relax),
-            "base_height": _lerp(-5.0, -0.2, relax),
+            "base_height": _lerp(-5.0, -2.0, relax),
         }
 
         # 第二层：根据“实际启用的自由度”做偏置修正。
@@ -299,7 +299,7 @@ def platform_reward_weight_schedule(
         # 当启用 z 时，对高度惩罚做大幅放松；同时稍微放松线速度惩罚，
         # 因为上下运动会间接放大机身线速度波动。
         if enabled_dofs["z"]:
-            weights["base_height"] *= 0.35
+            weights["base_height"] *= 0.60
             weights["base_linear_velocity"] *= 0.85
 
         # x/y 平移会让机器人在世界系中出现被动平移速度，因此主要放松线速度惩罚。
@@ -331,10 +331,10 @@ def platform_reward_weight_schedule(
 
         # 最后给几个下限，防止多种 DoF 同时启用时惩罚项被乘得过小，
         # 造成奖励失去约束、训练发散或策略钻空子。
-        weights["base_linear_velocity"] = min(weights["base_linear_velocity"], -0.08)
+        weights["base_linear_velocity"] = min(weights["base_linear_velocity"], -0.2)
         weights["base_angular_velocity"] = min(weights["base_angular_velocity"], -0.01)
-        weights["flat_orientation_l2"] = min(weights["flat_orientation_l2"], -0.30)
-        weights["base_height"] = min(weights["base_height"], -0.1)
+        weights["flat_orientation_l2"] = min(weights["flat_orientation_l2"], -0.50)
+        weights["base_height"] = min(weights["base_height"], -1.0)
 
         for term_name, weight in weights.items():
             _set_reward_term_weight(env, term_name, weight)
@@ -353,12 +353,13 @@ def platform_motion_amplitude(
     env_ids: Sequence[int],
     max_linear_acc: float = 0.5,
     lin_frequency_hz: float = 0.2,
+    z_amp_scale: float = 0.5,
 ) -> torch.Tensor:
-    """Log current platform x-axis amplitude (meters) under acceleration bound."""
+    """Log current platform z-axis amplitude (meters) under acceleration bound."""
     amp_scale = float(getattr(env, "platform_motion_amp_scale", 0.1))
     omega = 2.0 * math.pi * lin_frequency_hz
     max_lin_amp = max_linear_acc / max(omega * omega, 1e-6)
-    return torch.tensor(max_lin_amp * amp_scale, device=env.device)
+    return torch.tensor(max_lin_amp * z_amp_scale * amp_scale, device=env.device)
 
 
 def episode_count(env: ManagerBasedRLEnv, env_ids: Sequence[int]) -> torch.Tensor:
@@ -377,6 +378,25 @@ def platform_motion_level(env: ManagerBasedRLEnv, env_ids: Sequence[int]) -> tor
     """Log current platform motion DoF level set by curriculum."""
     level = float(getattr(env, "platform_motion_level", 0))
     return torch.tensor(level, device=env.device)
+
+
+def platform_motion_mode_id(env: ManagerBasedRLEnv, env_ids: Sequence[int]) -> torch.Tensor:
+    """Log current platform motion mode as a numeric id for scalar loggers.
+
+    Mapping:
+        rpy -> 0
+        xyz -> 1
+        z_rp -> 2
+        full -> 3
+    """
+    motion_mode = str(getattr(env, "platform_motion_mode", "xyz"))
+    motion_mode_to_id = {
+        "rpy": 0.0,
+        "xyz": 1.0,
+        "z_rp": 2.0,
+        "full": 3.0,
+    }
+    return torch.tensor(motion_mode_to_id.get(motion_mode, -1.0), device=env.device)
 
 
 def platform_amp_scale(env: ManagerBasedRLEnv, env_ids: Sequence[int]) -> torch.Tensor:

@@ -125,6 +125,7 @@ def move_platform_sine(
     asset_cfg: SceneEntityCfg = SceneEntityCfg("platform"),
     lin_frequency_hz: float = 0.2,
     max_linear_acc: float = 0.5,
+    z_amp_scale: float = 0.5,
     max_angular_acc: float = 0.125,
     sample_frequency: bool = False,
     sample_linear_acc: bool = False,
@@ -216,7 +217,7 @@ def move_platform_sine(
         [
             lin_amp,
             0.8 * lin_amp,
-            0.5 * lin_amp,
+            z_amp_scale * lin_amp,
             ang_amp,
             0.8 * ang_amp,
             0.6 * ang_amp,
@@ -227,7 +228,7 @@ def move_platform_sine(
         [
             lin_amp_dot,
             0.8 * lin_amp_dot,
-            0.5 * lin_amp_dot,
+            z_amp_scale * lin_amp_dot,
             ang_amp_dot,
             0.8 * ang_amp_dot,
             0.6 * ang_amp_dot,

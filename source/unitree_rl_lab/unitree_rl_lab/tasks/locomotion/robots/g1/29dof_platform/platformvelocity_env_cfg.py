@@ -39,12 +39,13 @@ from unitree_rl_lab.tasks.locomotion import mdp
 # - RobotEnvCfg：汇总所有配置，设置仿真参数、环境规模、节点周期等
 #-----------------------------------------------------------------------------
 
-PLATFORM_SIZE_X = 50.0
-PLATFORM_SIZE_Y = 50.0 # 平台尺寸，确保足够大以容纳机器人在上面运动，同时也可以调整以增加或减少运动难度
+PLATFORM_SIZE_X = 100.0
+PLATFORM_SIZE_Y = 100.0 # 平台尺寸，确保足够大以容纳机器人在上面运动，同时也可以调整以增加或减少运动难度
 PLATFORM_THICKNESS = 0.2 # 平台厚度，设置为0.2米以确保平台在物理模拟中具有足够的厚度，避免穿透问题，同时也不会过高以影响机器人运动的真实性
-PLATFORM_TOP_Z = 5.0 # 平台顶部的高度，设置为5.0米以提供足够的空间让机器人在平台上运动，同时也可以调整以增加或减少运动难度
+PLATFORM_TOP_Z = 8.0 # 平台顶部的高度，设置为5.0米以提供足够的空间让机器人在平台上运动，同时也可以调整以增加或减少运动难度
 PLATFORM_MOTION_FREQUENCY_HZ = 0.2
 PLATFORM_MOTION_MAX_LINEAR_ACC = 0.5
+PLATFORM_MOTION_Z_AMP_SCALE = 4.737410112522892 # z 振幅缩放系数；在 0.5 m/s^2、0.2 Hz、课程振幅满额时，对应 z 方向最大振幅约 1.5 m
 PLATFORM_MOTION_MAX_ANGULAR_ACC = 0.05
 PLATFORM_MOTION_SAMPLE_FREQUENCY = True
 PLATFORM_MOTION_SAMPLE_LINEAR_ACC = True
@@ -263,6 +264,7 @@ class EventCfg:
             "asset_cfg": SceneEntityCfg("platform"),
             "lin_frequency_hz": PLATFORM_MOTION_FREQUENCY_HZ,
             "max_linear_acc": PLATFORM_MOTION_MAX_LINEAR_ACC,
+            "z_amp_scale": PLATFORM_MOTION_Z_AMP_SCALE,
             # at 4m radius (half platform size), 0.125 rad/s^2 -> 0.5 m/s^2 tangential acceleration
             "max_angular_acc": PLATFORM_MOTION_MAX_ANGULAR_ACC,
             "sample_frequency": PLATFORM_MOTION_SAMPLE_FREQUENCY,
@@ -643,7 +645,7 @@ class CurriculumCfg:
     platform_motion_levels = CurrTerm(
         func=mdp.platform_motion_levels,
         params={
-            "motion_mode": "full", #设置平台运动的自由度
+            "motion_mode": "z_rp", #设置平台运动的自由度
             "dof_upgrade_every_episodes": 140,
             "amp_ramp_episodes": 800,
             "stationary_episodes": 200,
@@ -663,6 +665,14 @@ class CurriculumCfg:
     # 仅用于日志：当前平台 DoF 级别（0 表示热身期静止）。
     platform_motion_level = CurrTerm(func=mdp.platform_motion_level)
 
+    # 仅用于日志：当前平台运动模式编号。
+    # 映射关系：
+    #   rpy -> 0
+    #   xyz -> 1
+    #   z_rp -> 2
+    #   full -> 3
+    platform_motion_mode_id = CurrTerm(func=mdp.platform_motion_mode_id)
+
     # 仅用于日志：当前平台振幅缩放系数。
     platform_amp_scale = CurrTerm(func=mdp.platform_amp_scale)
     # 仅用于日志：课程升级质量分数（即时值与EMA）。
@@ -677,6 +687,7 @@ class CurriculumCfg:
         params={
             "max_linear_acc": PLATFORM_MOTION_MAX_LINEAR_ACC,
             "lin_frequency_hz": PLATFORM_MOTION_FREQUENCY_HZ,
+            "z_amp_scale": PLATFORM_MOTION_Z_AMP_SCALE,
         },
     )# 这里设置 platform_motion_amplitude 的 func 为 mdp.platform_motion_amplitude，表示使用一个基于当前课程级别的函数来设置平台运动的加速度峰值和频率，以提供一个动态调整平台运动挑战的机制；params 中的 max_linear_acc 设置为 0.5 m/s^2，表示平台线加速度的上限；lin_frequency_hz 设置为 0.2 Hz，表示平台运动的频率；如果需要更强或更弱的运动挑战，可以调整 max_linear_acc 和 lin_frequency_hz。
 
