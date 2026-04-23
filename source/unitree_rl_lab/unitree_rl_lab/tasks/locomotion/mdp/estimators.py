@@ -90,6 +90,8 @@ class PlatformRelativeEKFOutput:
     platform_ang_vel_w_est: torch.Tensor
     platform_lin_acc_w_est: torch.Tensor
     measurement_update_mask: torch.Tensor
+    fusion_weights: torch.Tensor          # (N, num_feet) normalized IMU fusion weights
+    vel_estimate_variance: torch.Tensor   # (N,) trace of P[3:6, 3:6]
 
 
 class PlatformRelativeEKF:
@@ -146,6 +148,7 @@ class PlatformRelativeEKF:
         ang_acc_smoothing: float = 0.85,
         vel_output_smoothing: float = 0.3,
         innovation_clip: float = 1.0,
+        touchdown_impact_damping: float = 0.15,
         dt: float | None = None,
     ):
         self.robot_name = robot_name
@@ -183,6 +186,7 @@ class PlatformRelativeEKF:
         self.ang_acc_smoothing = ang_acc_smoothing
         self.vel_output_smoothing = vel_output_smoothing
         self.innovation_clip = innovation_clip
+        self.touchdown_impact_damping = touchdown_impact_damping
         self.dt = dt
 
         self._resolved = False
@@ -222,6 +226,7 @@ class PlatformRelativeEKF:
         self.P[env_ids] = eye.unsqueeze(0) * self.init_covariance
         self.measurement_update_mask[env_ids] = measured_contact.max(dim=-1).values > self.stance_probability_threshold
         self.smoothed_vel_output[env_ids] = base_vel_rel_platform
+        self.fusion_weights[env_ids] = 0.0  # no meaningful fusion weights at reset
         self.is_initialized[env_ids] = True
         return self._build_output(env_ids, quat_rel)
 
@@ -248,7 +253,7 @@ class PlatformRelativeEKF:
         touchdown_mask = stance_mask & (~was_stance_mask)
         airborne_mask = ~torch.any(stance_mask, dim=-1)
 
-        fused = self._fuse_platform_imu(env_ids, smoothed_contact)
+        fused = self._fuse_platform_imu(env_ids, smoothed_contact, touchdown_mask=touchdown_mask)
         propagated_quat = _integrate_quat_world(self.platform_quat_w[env_ids], fused["platform_ang_vel_w"], dt)
         corrected_quat = _weighted_average_quat(
             torch.stack((propagated_quat, fused["platform_quat_w"]), dim=1),
@@ -403,6 +408,7 @@ class PlatformRelativeEKF:
             self.measurement_update_mask = torch.zeros(env.num_envs, device=self.device, dtype=torch.bool)
             self.is_initialized = torch.zeros(env.num_envs, device=self.device, dtype=torch.bool)
             self.smoothed_vel_output = torch.zeros((env.num_envs, 3), device=self.device, dtype=self.dtype)
+            self.fusion_weights = torch.zeros((env.num_envs, self.num_feet), device=self.device, dtype=self.dtype)
             self._buffers_ready = True
 
     def _canonical_env_ids(self, env: ManagerBasedRLEnv, env_ids: torch.Tensor | None) -> torch.Tensor:
@@ -411,22 +417,34 @@ class PlatformRelativeEKF:
         return torch.as_tensor(env_ids, device=env.device, dtype=torch.long)
 
     def _measure_contacts(self, env_ids: torch.Tensor) -> torch.Tensor:
+        """Compute per-foot contact probability from normal force fraction.
+
+        Returns a continuous value in [0, 1] per foot.  When the foot is firmly
+        planted the normal component dominates the total force and the weight
+        approaches 1.  During sliding or light contact the weight drops.
+        A minimum threshold gates out sensor noise.
+        """
         contacts = []
         for sensor in self._foot_contacts:
-            if hasattr(sensor.data, "current_contact_time") and sensor.data.current_contact_time is not None:
-                contact_time = sensor.data.current_contact_time[env_ids]
-                if contact_time.dim() > 1:
-                    contact_time = contact_time.squeeze(-1)
-                contact = (contact_time > 0.0).to(dtype=self.dtype)
-            else:
-                net_force = sensor.data.net_forces_w[env_ids]
-                if net_force.dim() > 2:
-                    net_force = net_force.squeeze(1)
-                contact = (torch.linalg.norm(net_force, dim=-1) > self.contact_force_threshold).to(dtype=self.dtype)
-            contacts.append(contact)
+            net_force = sensor.data.net_forces_w[env_ids]
+            if net_force.dim() > 2:
+                net_force = net_force.squeeze(1)
+            # Normal (z-up) force and total force magnitude
+            f_z = net_force[..., 2].clamp(min=0.0)          # upward component only
+            f_norm = torch.linalg.norm(net_force, dim=-1)    # total magnitude
+            # Continuous contact weight: ratio of normal to total force
+            weight = f_z / (f_norm + 1.0e-6)
+            # Gate out sub-threshold noise
+            weight = weight * (f_norm > self.contact_force_threshold).to(dtype=self.dtype)
+            contacts.append(weight)
         return torch.clamp(_sanitize_tensor(torch.stack(contacts, dim=-1)), 0.0, 1.0)
 
-    def _fuse_platform_imu(self, env_ids: torch.Tensor, contact_prob: torch.Tensor) -> dict[str, torch.Tensor]:
+    def _fuse_platform_imu(
+        self,
+        env_ids: torch.Tensor,
+        contact_prob: torch.Tensor,
+        touchdown_mask: torch.Tensor | None = None,
+    ) -> dict[str, torch.Tensor]:
         foot_quat_w = []
         foot_ang_vel_w = []
         foot_ang_acc_w = []
@@ -443,9 +461,18 @@ class PlatformRelativeEKF:
         foot_ang_acc_w = _sanitize_tensor(torch.stack(foot_ang_acc_w, dim=1), self.max_abs_angular_acceleration)
         foot_lin_acc_w = _sanitize_tensor(torch.stack(foot_lin_acc_w, dim=1), self.max_abs_acceleration)
 
-        weight_sum = torch.sum(contact_prob, dim=-1, keepdim=True)
+        # Dampen weights for feet that just touched down (impact transient)
+        effective_prob = contact_prob
+        if touchdown_mask is not None and self.touchdown_impact_damping > 0.0:
+            damping = torch.where(touchdown_mask, self.touchdown_impact_damping, 1.0)
+            effective_prob = contact_prob * damping
+
+        weight_sum = torch.sum(effective_prob, dim=-1, keepdim=True)
         safe_weight_sum = torch.clamp(weight_sum, min=1.0)
-        weights = contact_prob / safe_weight_sum
+        weights = effective_prob / safe_weight_sum
+
+        # Store normalized fusion weights for external consumption
+        self.fusion_weights[env_ids] = weights
 
         has_contact = weight_sum.squeeze(-1) > 1.0e-6
         fallback_quat = self.platform_quat_w[env_ids]
@@ -675,6 +702,10 @@ class PlatformRelativeEKF:
             if self.vel_output_smoothing > 0.0
             else self.x[env_ids, 3:6]
         )
+        # Velocity estimate variance: trace of P velocity sub-block
+        vel_var = torch.diagonal(self.P[env_ids, 3:6, 3:6], dim1=-2, dim2=-1).sum(dim=-1)
+        vel_var = torch.clamp(_sanitize_tensor(vel_var), min=0.0)
+
         return PlatformRelativeEKFOutput(
             base_pos_rel_platform=_sanitize_tensor(self.x[env_ids, 0:3], self.max_abs_position),
             base_vel_rel_platform=_sanitize_tensor(vel_out, self.max_abs_velocity),
@@ -688,6 +719,8 @@ class PlatformRelativeEKF:
             platform_ang_vel_w_est=_sanitize_tensor(self.platform_ang_vel_w[env_ids], self.max_abs_angular_rate),
             platform_lin_acc_w_est=_sanitize_tensor(self.platform_lin_acc_w[env_ids], self.max_abs_acceleration),
             measurement_update_mask=self.measurement_update_mask[env_ids],
+            fusion_weights=torch.clamp(_sanitize_tensor(self.fusion_weights[env_ids]), 0.0, 1.0),
+            vel_estimate_variance=vel_var,
         )
 
     def _sanitize_state(self, state: torch.Tensor) -> torch.Tensor:

@@ -72,6 +72,7 @@ simulation_app = app_launcher.app
 """Rest everything follows."""
 
 import gymnasium as gym
+import math
 import os
 import time
 import torch
@@ -100,6 +101,16 @@ except ImportError:
 class EkfRealtimePlotter:
     """Realtime panel for comparing EKF estimates against simulator truth."""
 
+    @staticmethod
+    def _quat_to_rpy(q: torch.Tensor) -> tuple[float, float, float]:
+        """Convert a (4,) quaternion [w, x, y, z] tensor to roll/pitch/yaw (radians)."""
+        w, x, y, z = float(q[0]), float(q[1]), float(q[2]), float(q[3])
+        roll = math.atan2(2.0 * (w * x + y * z), 1.0 - 2.0 * (x * x + y * y))
+        sinp = max(-1.0, min(1.0, 2.0 * (w * y - z * x)))
+        pitch = math.asin(sinp)
+        yaw = math.atan2(2.0 * (w * z + x * y), 1.0 - 2.0 * (y * y + z * z))
+        return roll, pitch, yaw
+
     def __init__(self, max_points: int = 200, update_every: int = 2) -> None:
         self.max_points = max_points
         self.update_every = update_every
@@ -107,11 +118,10 @@ class EkfRealtimePlotter:
         self.enabled = plt is not None
         self._history = {
             "t": deque(maxlen=max_points),
-            "pos_est": [deque(maxlen=max_points) for _ in range(3)],
-            "pos_true": [deque(maxlen=max_points) for _ in range(3)],
+            "quat_est": [deque(maxlen=max_points) for _ in range(3)],
+            "quat_true": [deque(maxlen=max_points) for _ in range(3)],
             "vel_est": [deque(maxlen=max_points) for _ in range(3)],
             "vel_true": [deque(maxlen=max_points) for _ in range(3)],
-            "pos_err": deque(maxlen=max_points),
             "vel_err": deque(maxlen=max_points),
             "quat_err": deque(maxlen=max_points),
         }
@@ -129,26 +139,25 @@ class EkfRealtimePlotter:
 
         colors = ["tab:red", "tab:green", "tab:blue"]
         labels = ["x", "y", "z"]
+        rpy_labels = ["roll", "pitch", "yaw"]
 
         for i in range(3):
-            (line_pos_est,) = axes[0].plot([], [], color=colors[i], linestyle="-", label=f"pos est {labels[i]}")
-            (line_pos_true,) = axes[0].plot([], [], color=colors[i], linestyle="--", label=f"pos true {labels[i]}")
-            self._lines[f"pos_est_{i}"] = line_pos_est
-            self._lines[f"pos_true_{i}"] = line_pos_true
+            (line_quat_est,) = axes[0].plot([], [], color=colors[i], linestyle="-", label=f"{rpy_labels[i]} est")
+            (line_quat_true,) = axes[0].plot([], [], color=colors[i], linestyle="--", label=f"{rpy_labels[i]} true")
+            self._lines[f"quat_est_{i}"] = line_quat_est
+            self._lines[f"quat_true_{i}"] = line_quat_true
 
             (line_vel_est,) = axes[1].plot([], [], color=colors[i], linestyle="-", label=f"vel est {labels[i]}")
             (line_vel_true,) = axes[1].plot([], [], color=colors[i], linestyle="--", label=f"vel true {labels[i]}")
             self._lines[f"vel_est_{i}"] = line_vel_est
             self._lines[f"vel_true_{i}"] = line_vel_true
 
-        (line_pos_err,) = axes[2].plot([], [], color="tab:orange", label="pos error")
         (line_vel_err,) = axes[2].plot([], [], color="tab:purple", label="vel error")
         (line_quat_err,) = axes[2].plot([], [], color="tab:brown", label="quat error rad")
-        self._lines["pos_err"] = line_pos_err
         self._lines["vel_err"] = line_vel_err
         self._lines["quat_err"] = line_quat_err
 
-        axes[0].set_ylabel("Base Rel Pos")
+        axes[0].set_ylabel("Rel Orientation (rad)")
         axes[1].set_ylabel("Base Rel Vel")
         axes[2].set_ylabel("Errors")
         axes[2].set_xlabel("Step")
@@ -172,13 +181,14 @@ class EkfRealtimePlotter:
             return
 
         self._history["t"].append(step_idx)
+        rpy_est = self._quat_to_rpy(panel_data["base_quat_rel_est"])
+        rpy_true = self._quat_to_rpy(panel_data["base_quat_rel_truth"])
         for i in range(3):
-            self._history["pos_est"][i].append(float(panel_data["base_pos_rel_est"][i]))
-            self._history["pos_true"][i].append(float(panel_data["base_pos_rel_truth"][i]))
+            self._history["quat_est"][i].append(rpy_est[i])
+            self._history["quat_true"][i].append(rpy_true[i])
             self._history["vel_est"][i].append(float(panel_data["base_vel_rel_est"][i]))
             self._history["vel_true"][i].append(float(panel_data["base_vel_rel_truth"][i]))
 
-        self._history["pos_err"].append(float(panel_data["base_pos_rel_error"]))
         self._history["vel_err"].append(float(panel_data["base_vel_rel_error"]))
         self._history["quat_err"].append(float(panel_data["base_quat_rel_error_rad"]))
 
@@ -188,12 +198,11 @@ class EkfRealtimePlotter:
 
         t = list(self._history["t"])
         for i in range(3):
-            self._lines[f"pos_est_{i}"].set_data(t, list(self._history["pos_est"][i]))
-            self._lines[f"pos_true_{i}"].set_data(t, list(self._history["pos_true"][i]))
+            self._lines[f"quat_est_{i}"].set_data(t, list(self._history["quat_est"][i]))
+            self._lines[f"quat_true_{i}"].set_data(t, list(self._history["quat_true"][i]))
             self._lines[f"vel_est_{i}"].set_data(t, list(self._history["vel_est"][i]))
             self._lines[f"vel_true_{i}"].set_data(t, list(self._history["vel_true"][i]))
 
-        self._lines["pos_err"].set_data(t, list(self._history["pos_err"]))
         self._lines["vel_err"].set_data(t, list(self._history["vel_err"]))
         self._lines["quat_err"].set_data(t, list(self._history["quat_err"]))
 
