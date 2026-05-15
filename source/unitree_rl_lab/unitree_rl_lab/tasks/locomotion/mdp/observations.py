@@ -64,6 +64,45 @@ def _quat_angle_error(q_est: torch.Tensor, q_true: torch.Tensor) -> torch.Tensor
     return 2.0 * torch.atan2(imag_norm, torch.abs(q_err[:, 0]))
 
 
+def _quat_to_rpy(quat: torch.Tensor) -> torch.Tensor:
+    """Convert batched quaternions [w, x, y, z] to roll/pitch/yaw radians."""
+    w, x, y, z = quat.unbind(dim=-1)
+    roll = torch.atan2(2.0 * (w * x + y * z), 1.0 - 2.0 * (x * x + y * y))
+    sinp = torch.clamp(2.0 * (w * y - z * x), -1.0, 1.0)
+    pitch = torch.asin(sinp)
+    yaw = torch.atan2(2.0 * (w * z + x * y), 1.0 - 2.0 * (y * y + z * z))
+    return torch.stack((roll, pitch, yaw), dim=-1)
+
+
+def _quat_to_rot6d(quat: torch.Tensor) -> torch.Tensor:
+    """Convert batched quaternions [w, x, y, z] to the first two rotation-matrix columns."""
+    quat = quat / torch.linalg.norm(quat, dim=-1, keepdim=True).clamp_min(1.0e-9)
+    w, x, y, z = quat.unbind(dim=-1)
+
+    col0 = torch.stack(
+        (
+            1.0 - 2.0 * (y * y + z * z),
+            2.0 * (x * y + w * z),
+            2.0 * (x * z - w * y),
+        ),
+        dim=-1,
+    )
+    col1 = torch.stack(
+        (
+            2.0 * (x * y - w * z),
+            1.0 - 2.0 * (x * x + z * z),
+            2.0 * (y * z + w * x),
+        ),
+        dim=-1,
+    )
+    return torch.cat((col0, col1), dim=-1)
+
+
+def _wrap_angle(angle: torch.Tensor) -> torch.Tensor:
+    """Wrap angles to [-pi, pi]."""
+    return torch.remainder(angle + torch.pi, 2.0 * torch.pi) - torch.pi
+
+
 def _get_platform_relative_ekf_output(env: ManagerBasedRLEnv) -> PlatformRelativeEKFOutput:
     """Compute or fetch the cached EKF output for the current env step."""
     cache = getattr(env, "_platform_relative_ekf_cache", None)
@@ -127,7 +166,18 @@ def _update_platform_relative_ekf_debug(
     platform_vel_w = platform.data.root_lin_vel_w
     platform_quat_w = platform.data.root_quat_w
     platform_ang_vel_w = platform.data.root_ang_vel_w
-    platform_lin_acc_w = platform.data.body_lin_acc_w[:, 0]
+    current_step = int(getattr(env, "common_step_counter", 0))
+    prev_platform_vel_w = cache.get("debug_prev_platform_vel_w")
+    prev_platform_vel_step = cache.get("debug_prev_platform_vel_step")
+    if prev_platform_vel_w is not None and prev_platform_vel_step is not None and current_step > prev_platform_vel_step:
+        debug_dt = max((current_step - prev_platform_vel_step) * float(env.step_dt), 1.0e-9)
+        platform_lin_acc_w = (platform_vel_w - prev_platform_vel_w) / debug_dt
+    else:
+        platform_lin_acc_w = torch.zeros_like(platform_vel_w)
+    if reset_ids.numel() > 0:
+        platform_lin_acc_w[reset_ids] = 0.0
+    cache["debug_prev_platform_vel_w"] = platform_vel_w.detach().clone()
+    cache["debug_prev_platform_vel_step"] = current_step
 
     if reset_ids.numel() > 0:
         base_pos_rel_truth_reset = quat_apply_inverse(
@@ -144,8 +194,11 @@ def _update_platform_relative_ekf_debug(
     base_quat_rel_truth = quat_mul(quat_inv(platform_quat_w), base_quat_w)
 
     pos_error = torch.linalg.norm(output.base_pos_rel_platform - base_pos_rel_truth, dim=-1)
-    vel_error = torch.linalg.norm(output.base_vel_rel_platform - base_vel_rel_truth, dim=-1)
-    quat_error = _quat_angle_error(output.base_quat_rel_platform, base_quat_rel_truth)
+    vel_error = torch.abs(output.base_vel_rel_platform[:, 2] - base_vel_rel_truth[:, 2])
+    base_quat_rp_error = _wrap_angle(
+        _quat_to_rpy(output.base_quat_rel_platform)[:, :2] - _quat_to_rpy(base_quat_rel_truth)[:, :2]
+    )
+    quat_error = torch.linalg.norm(base_quat_rp_error, dim=-1)
     platform_quat_error = _quat_angle_error(platform_quat_est, platform_quat_w)
     platform_ang_vel_error = torch.linalg.norm(output.platform_ang_vel_w_est - platform_ang_vel_w, dim=-1)
     platform_lin_acc_error = torch.linalg.norm(output.platform_lin_acc_w_est - platform_lin_acc_w, dim=-1)
@@ -165,6 +218,7 @@ def _update_platform_relative_ekf_debug(
         "base_pos_rel_truth": base_pos_rel_truth[env_id].detach().cpu().clone(),
         "base_vel_rel_est": output.base_vel_rel_platform[env_id].detach().cpu().clone(),
         "base_vel_rel_truth": base_vel_rel_truth[env_id].detach().cpu().clone(),
+        "base_vel_rel_kin_z": output.base_vel_rel_platform_kin_z[env_id].detach().cpu().clone(),
         "base_quat_rel_est": output.base_quat_rel_platform[env_id].detach().cpu().clone(),
         "base_quat_rel_truth": base_quat_rel_truth[env_id].detach().cpu().clone(),
         "base_pos_rel_error": pos_error[env_id].detach().cpu().clone(),
@@ -173,6 +227,7 @@ def _update_platform_relative_ekf_debug(
         "platform_quat_error_rad": platform_quat_error[env_id].detach().cpu().clone(),
         "platform_ang_vel_error": platform_ang_vel_error[env_id].detach().cpu().clone(),
         "platform_lin_acc_error": platform_lin_acc_error[env_id].detach().cpu().clone(),
+        "foot_contact_prob": output.contact_prob[env_id].detach().cpu().clone(),
     }
 
     if cache["visualizer"] is None:
@@ -228,9 +283,27 @@ def ekf_base_vel_rel_platform(env: ManagerBasedRLEnv) -> torch.Tensor:
     return torch.nan_to_num(_get_platform_relative_ekf_output(env).base_vel_rel_platform, nan=0.0, posinf=0.0, neginf=0.0)
 
 
+def ekf_base_vel_z_rel_platform(env: ManagerBasedRLEnv) -> torch.Tensor:
+    """Estimated robot base vertical velocity relative to the platform-attached EKF frame."""
+    vel_z = _get_platform_relative_ekf_output(env).base_vel_rel_platform[:, 2:3]
+    return torch.nan_to_num(vel_z, nan=0.0, posinf=0.0, neginf=0.0)
+
+
 def ekf_base_quat_rel_platform(env: ManagerBasedRLEnv) -> torch.Tensor:
     """Estimated robot base orientation relative to the platform-attached EKF frame."""
     return torch.nan_to_num(_get_platform_relative_ekf_output(env).base_quat_rel_platform, nan=0.0, posinf=0.0, neginf=0.0)
+
+
+def ekf_base_rot6d_rel_platform(env: ManagerBasedRLEnv) -> torch.Tensor:
+    """Estimated robot base orientation relative to the platform as rotation-matrix columns."""
+    rot6d = _quat_to_rot6d(_get_platform_relative_ekf_output(env).base_quat_rel_platform)
+    return torch.nan_to_num(rot6d, nan=0.0, posinf=0.0, neginf=0.0)
+
+
+def ekf_base_roll_pitch_rel_platform(env: ManagerBasedRLEnv) -> torch.Tensor:
+    """Estimated robot base roll/pitch relative to the platform-attached EKF frame."""
+    roll_pitch = _quat_to_rpy(_get_platform_relative_ekf_output(env).base_quat_rel_platform)[:, :2]
+    return torch.nan_to_num(roll_pitch, nan=0.0, posinf=0.0, neginf=0.0)
 
 
 # ---------------------------------------------------------------------------
@@ -279,3 +352,16 @@ def gt_base_quat_rel_platform(
     platform: RigidObject = env.scene[platform_asset_cfg.name]
     quat_rel = quat_mul(quat_inv(platform.data.root_quat_w), robot.data.root_quat_w)
     return torch.nan_to_num(quat_rel, nan=0.0, posinf=0.0, neginf=0.0)
+
+
+def gt_base_rot6d_rel_platform(
+    env: ManagerBasedRLEnv,
+    robot_asset_cfg: SceneEntityCfg = SceneEntityCfg("robot"),
+    platform_asset_cfg: SceneEntityCfg = SceneEntityCfg("platform"),
+) -> torch.Tensor:
+    """Privileged: true robot base orientation relative to platform as rotation-matrix columns."""
+    robot: RigidObject = env.scene[robot_asset_cfg.name]
+    platform: RigidObject = env.scene[platform_asset_cfg.name]
+    quat_rel = quat_mul(quat_inv(platform.data.root_quat_w), robot.data.root_quat_w)
+    rot6d = _quat_to_rot6d(quat_rel)
+    return torch.nan_to_num(rot6d, nan=0.0, posinf=0.0, neginf=0.0)

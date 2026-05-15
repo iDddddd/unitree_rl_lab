@@ -33,6 +33,7 @@ def move_platform_sine(
     lin_frequency_hz: float = 0.2,
     max_linear_acc: float = 0.5,
     max_angular_acc: float = 0.125,
+    z_amp_scale: float = 0.5,
 ):
     """Move platform with sinusoidal motion and curriculum-controlled DoF/amplitude.
 
@@ -67,7 +68,7 @@ def move_platform_sine(
 
     # Axis-specific amplitude shaping (x, y, z, roll, pitch, yaw).
     amp_vec = torch.tensor(
-        [lin_amp, 0.8 * lin_amp, 0.5 * lin_amp, ang_amp, 0.8 * ang_amp, 0.6 * ang_amp],
+        [lin_amp, 0.8 * lin_amp, z_amp_scale * lin_amp, ang_amp, 0.8 * ang_amp, 0.6 * ang_amp],
         device=env.device,
     )
 
@@ -101,7 +102,7 @@ def reset_platform_state(
     env_ids: Sequence[int],
     asset_cfg: SceneEntityCfg = SceneEntityCfg("platform"),
 ):
-    """Reset platform pose/velocity to default state and resample its phase.
+    """Reset platform pose/velocity to default state and restart its motion from zero offset.
 
     这样可以保证每个 episode 的起点都是“平台先回到中性位姿，再生成机器人”，
     避免当平台启用了 z/roll/pitch 自由度时，机器人按旧高度生成到平台内部。
@@ -119,10 +120,10 @@ def reset_platform_state(
     asset.write_root_pose_to_sim(base_root[:, :7], env_ids=env_ids_t)
     asset.write_root_velocity_to_sim(torch.zeros((len(env_ids_t), 6), device=env.device), env_ids=env_ids_t)
 
-    # 为这些 env 重新采样正弦相位，供后续 episode 使用。
-    # 由于 reset 之后 episode_length_buf 会回到 0，平台会先从默认 pose 起步，
-    # 下一步再按新的随机相位开始运动。
-    env._platform_motion_phase[env_ids_t] = 2.0 * math.pi * torch.rand((len(env_ids_t), 6), device=env.device)
+    # 下一次 move_platform_sine 从零位移开始，避免 reset 后第一帧按随机相位跳到
+    # 抬升/倾斜的平台位姿，导致机器人刚生成就悬空或插入平台。
+    phase_sign = torch.randint(0, 2, (len(env_ids_t), 6), device=env.device).to(dtype=torch.float32)
+    env._platform_motion_phase[env_ids_t] = phase_sign * math.pi
 
 
 def _platform_motion_dof_mask(mode: str, level: int, device: torch.device) -> torch.Tensor:

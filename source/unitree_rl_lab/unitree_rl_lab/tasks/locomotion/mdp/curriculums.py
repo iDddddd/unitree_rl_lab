@@ -353,12 +353,13 @@ def platform_motion_amplitude(
     env_ids: Sequence[int],
     max_linear_acc: float = 0.5,
     lin_frequency_hz: float = 0.2,
+    z_amp_scale: float = 1.0,
 ) -> torch.Tensor:
-    """Log current platform x-axis amplitude (meters) under acceleration bound."""
+    """Log current platform z-axis amplitude (meters) under acceleration bound."""
     amp_scale = float(getattr(env, "platform_motion_amp_scale", 0.1))
     omega = 2.0 * math.pi * lin_frequency_hz
     max_lin_amp = max_linear_acc / max(omega * omega, 1e-6)
-    return torch.tensor(max_lin_amp * amp_scale, device=env.device)
+    return torch.tensor(max_lin_amp * z_amp_scale * amp_scale, device=env.device)
 
 
 def episode_count(env: ManagerBasedRLEnv, env_ids: Sequence[int]) -> torch.Tensor:

@@ -122,12 +122,17 @@ class EkfRealtimePlotter:
             "quat_true": [deque(maxlen=max_points) for _ in range(3)],
             "vel_est": [deque(maxlen=max_points) for _ in range(3)],
             "vel_true": [deque(maxlen=max_points) for _ in range(3)],
+            "vel_kin_z": deque(maxlen=max_points),
             "vel_err": deque(maxlen=max_points),
             "quat_err": deque(maxlen=max_points),
+            "left_contact": deque(maxlen=max_points),
+            "right_contact": deque(maxlen=max_points),
         }
         self._fig = None
         self._axes = None
         self._lines = {}
+        self._rpy_indices = (0, 1)
+        self._vel_indices = (2,)
 
         if not self.enabled:
             return
@@ -141,29 +146,39 @@ class EkfRealtimePlotter:
         labels = ["x", "y", "z"]
         rpy_labels = ["roll", "pitch", "yaw"]
 
-        for i in range(3):
+        for i in self._rpy_indices:
             (line_quat_est,) = axes[0].plot([], [], color=colors[i], linestyle="-", label=f"{rpy_labels[i]} est")
             (line_quat_true,) = axes[0].plot([], [], color=colors[i], linestyle="--", label=f"{rpy_labels[i]} true")
             self._lines[f"quat_est_{i}"] = line_quat_est
             self._lines[f"quat_true_{i}"] = line_quat_true
 
-            (line_vel_est,) = axes[1].plot([], [], color=colors[i], linestyle="-", label=f"vel est {labels[i]}")
+        for i in self._vel_indices:
             (line_vel_true,) = axes[1].plot([], [], color=colors[i], linestyle="--", label=f"vel true {labels[i]}")
-            self._lines[f"vel_est_{i}"] = line_vel_est
             self._lines[f"vel_true_{i}"] = line_vel_true
+        (line_vel_kin_z,) = axes[1].plot([], [], color="tab:orange", linestyle=":", label="vel kin z")
+        self._lines["vel_kin_z"] = line_vel_kin_z
 
-        (line_vel_err,) = axes[2].plot([], [], color="tab:purple", label="vel error")
-        (line_quat_err,) = axes[2].plot([], [], color="tab:brown", label="quat error rad")
+        (line_vel_err,) = axes[2].plot([], [], color="tab:purple", label="vel z error")
+        (line_quat_err,) = axes[2].plot([], [], color="tab:brown", label="roll/pitch error rad")
         self._lines["vel_err"] = line_vel_err
         self._lines["quat_err"] = line_quat_err
+
+        self._contact_text = axes[2].text(
+            0.01,
+            0.95,
+            "",
+            transform=axes[2].transAxes,
+            va="top",
+            fontsize=9,
+            bbox={"boxstyle": "round", "facecolor": "white", "alpha": 0.75, "edgecolor": "0.75"},
+        )
 
         axes[0].set_ylabel("Rel Orientation (rad)")
         axes[1].set_ylabel("Base Rel Vel")
         axes[2].set_ylabel("Errors")
         axes[2].set_xlabel("Step")
-        axes[0].grid(True, alpha=0.3)
-        axes[1].grid(True, alpha=0.3)
-        axes[2].grid(True, alpha=0.3)
+        for ax in axes:
+            ax.grid(True, alpha=0.3)
         axes[0].legend(loc="upper right", ncol=2, fontsize=8)
         axes[1].legend(loc="upper right", ncol=2, fontsize=8)
         axes[2].legend(loc="upper right", fontsize=8)
@@ -183,28 +198,41 @@ class EkfRealtimePlotter:
         self._history["t"].append(step_idx)
         rpy_est = self._quat_to_rpy(panel_data["base_quat_rel_est"])
         rpy_true = self._quat_to_rpy(panel_data["base_quat_rel_truth"])
-        for i in range(3):
+        for i in self._rpy_indices:
             self._history["quat_est"][i].append(rpy_est[i])
             self._history["quat_true"][i].append(rpy_true[i])
+        for i in self._vel_indices:
             self._history["vel_est"][i].append(float(panel_data["base_vel_rel_est"][i]))
             self._history["vel_true"][i].append(float(panel_data["base_vel_rel_truth"][i]))
 
+        self._history["vel_kin_z"].append(float(panel_data.get("base_vel_rel_kin_z", float("nan"))))
         self._history["vel_err"].append(float(panel_data["base_vel_rel_error"]))
         self._history["quat_err"].append(float(panel_data["base_quat_rel_error_rad"]))
+        contact_prob = torch.as_tensor(panel_data.get("foot_contact_prob", [float("nan"), float("nan")]))
+        left_prob = float(contact_prob[0]) if contact_prob.numel() > 0 else float("nan")
+        right_prob = float(contact_prob[1]) if contact_prob.numel() > 1 else float("nan")
+        self._history["left_contact"].append(left_prob)
+        self._history["right_contact"].append(right_prob)
 
         self.step += 1
         if self.step % self.update_every != 0:
             return
 
         t = list(self._history["t"])
-        for i in range(3):
+        for i in self._rpy_indices:
             self._lines[f"quat_est_{i}"].set_data(t, list(self._history["quat_est"][i]))
             self._lines[f"quat_true_{i}"].set_data(t, list(self._history["quat_true"][i]))
-            self._lines[f"vel_est_{i}"].set_data(t, list(self._history["vel_est"][i]))
+        for i in self._vel_indices:
             self._lines[f"vel_true_{i}"].set_data(t, list(self._history["vel_true"][i]))
 
         self._lines["vel_err"].set_data(t, list(self._history["vel_err"]))
         self._lines["quat_err"].set_data(t, list(self._history["quat_err"]))
+        self._lines["vel_kin_z"].set_data(t, list(self._history["vel_kin_z"]))
+        left_state = "contact" if left_prob > 0.5 else "air"
+        right_state = "contact" if right_prob > 0.5 else "air"
+        self._contact_text.set_text(
+            f"Left foot: {left_state} ({left_prob:.2f})\nRight foot: {right_state} ({right_prob:.2f})"
+        )
 
         env_id = int(panel_data.get("env_id", 0))
         platform_quat_err = float(panel_data.get("platform_quat_error_rad", 0.0))

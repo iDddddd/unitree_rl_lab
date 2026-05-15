@@ -1,5 +1,7 @@
 import math
+from collections.abc import Callable
 
+import isaacsim.core.utils.prims as prim_utils
 import isaaclab.sim as sim_utils
 import isaaclab.terrains as terrain_gen
 from isaaclab.assets import ArticulationCfg, AssetBaseCfg, RigidObjectCfg
@@ -17,6 +19,7 @@ from isaaclab.terrains import TerrainImporterCfg
 from isaaclab.utils import configclass
 from isaaclab.utils.assets import ISAAC_NUCLEUS_DIR, ISAACLAB_NUCLEUS_DIR
 from isaaclab.utils.noise import AdditiveUniformNoiseCfg as Unoise
+from pxr import Gf, Usd, UsdGeom, Vt
 
 from unitree_rl_lab.assets.robots.unitree import UNITREE_G1_29DOF_CFG as ROBOT_CFG
 from unitree_rl_lab.tasks.locomotion import mdp
@@ -39,10 +42,104 @@ from unitree_rl_lab.tasks.locomotion import mdp
 # - RobotEnvCfg：汇总所有配置，设置仿真参数、环境规模、节点周期等
 #-----------------------------------------------------------------------------
 
-PLATFORM_SIZE_X = 20.0
-PLATFORM_SIZE_Y = 20.0 # 平台尺寸，确保足够大以容纳机器人在上面运动，同时也可以调整以增加或减少运动难度
+PLATFORM_SIZE_X = 50.0
+PLATFORM_SIZE_Y = 50.0 # 平台尺寸，确保足够大以容纳机器人在上面运动，同时也可以调整以增加或减少运动难度
 PLATFORM_THICKNESS = 0.2 # 平台厚度，设置为0.2米以确保平台在物理模拟中具有足够的厚度，避免穿透问题，同时也不会过高以影响机器人运动的真实性
 PLATFORM_TOP_Z = 1.0 # 平台顶部的高度，设置为1.0米以提供足够的空间让机器人在平台上运动，同时也可以调整以增加或减少运动难度
+PLATFORM_CHECKER_SQUARE_SIZE = 1.0 # 平台表面棋盘格边长（米），用于增强平台运动的视觉参照。
+# 0.75 / 0.31663 = 2.369，z上下振幅为0.75m时，最大高度差为1.5m。
+PLATFORM_MOTION_Z_AMP_SCALE = 2.37 # z方向平台运动振幅缩放。z振幅 = 该值 * max_linear_acc / (2*pi*f)^2 * platform_amp_scale。
+
+
+@sim_utils.clone
+def spawn_checkerboard_platform(
+    prim_path: str,
+    cfg,
+    translation: tuple[float, float, float] | None = None,
+    orientation: tuple[float, float, float, float] | None = None,
+    **kwargs,
+) -> Usd.Prim:
+    """Spawn the physics platform, then add a colored top mesh for visual motion cues."""
+
+    base_cfg = sim_utils.CuboidCfg(
+        visible=cfg.visible,
+        semantic_tags=cfg.semantic_tags,
+        copy_from_source=cfg.copy_from_source,
+        mass_props=cfg.mass_props,
+        rigid_props=cfg.rigid_props,
+        collision_props=cfg.collision_props,
+        activate_contact_sensors=cfg.activate_contact_sensors,
+        visual_material_path=cfg.visual_material_path,
+        visual_material=cfg.visual_material or sim_utils.PreviewSurfaceCfg(diffuse_color=cfg.side_color),
+        physics_material_path=cfg.physics_material_path,
+        physics_material=cfg.physics_material,
+        size=cfg.size,
+    )
+    base_cfg.func(prim_path, base_cfg, translation=translation, orientation=orientation, **kwargs)
+    _add_checkerboard_top_mesh(prim_path, cfg)
+    return prim_utils.get_prim_at_path(prim_path)
+
+
+@configclass
+class CheckerboardPlatformCfg(sim_utils.CuboidCfg):
+    """Cuboid platform with a non-colliding checkerboard visual overlay on the top face."""
+
+    func: Callable[..., Usd.Prim] = spawn_checkerboard_platform
+    checker_square_size: float = PLATFORM_CHECKER_SQUARE_SIZE
+    checker_top_offset: float = 0.002
+    checker_white_color: tuple[float, float, float] = (0.9, 0.9, 0.9)
+    checker_black_color: tuple[float, float, float] = (0.02, 0.02, 0.02)
+    side_color: tuple[float, float, float] = (0.35, 0.35, 0.4)
+
+
+def _add_checkerboard_top_mesh(prim_path: str, cfg: CheckerboardPlatformCfg) -> None:
+    """Create a one-mesh, no-collision checkerboard overlay above the platform top face."""
+
+    square_size = max(float(cfg.checker_square_size), 1e-3)
+    size_x, size_y, size_z = cfg.size
+    num_x = max(1, math.ceil(size_x / square_size))
+    num_y = max(1, math.ceil(size_y / square_size))
+    step_x = size_x / num_x
+    step_y = size_y / num_y
+    min_x = -0.5 * size_x
+    min_y = -0.5 * size_y
+    top_z = 0.5 * size_z + cfg.checker_top_offset
+
+    points: list[tuple[float, float, float]] = []
+    face_vertex_indices: list[int] = []
+    face_vertex_counts: list[int] = []
+    face_colors: list[Gf.Vec3f] = []
+
+    for ix in range(num_x):
+        for iy in range(num_y):
+            x0 = min_x + ix * step_x
+            x1 = min_x + (ix + 1) * step_x
+            y0 = min_y + iy * step_y
+            y1 = min_y + (iy + 1) * step_y
+            start = len(points)
+            points.extend([(x0, y0, top_z), (x1, y0, top_z), (x1, y1, top_z), (x0, y1, top_z)])
+            face_vertex_indices.extend([start, start + 1, start + 2, start + 3])
+            face_vertex_counts.append(4)
+            color = cfg.checker_white_color if (ix + iy) % 2 == 0 else cfg.checker_black_color
+            face_colors.append(Gf.Vec3f(*color))
+
+    mesh_path = f"{prim_path}/geometry/checkerboard_top"
+    if prim_utils.is_prim_path_valid(mesh_path):
+        return
+    mesh_prim = prim_utils.create_prim(
+        mesh_path,
+        prim_type="Mesh",
+        attributes={
+            "points": points,
+            "faceVertexIndices": face_vertex_indices,
+            "faceVertexCounts": face_vertex_counts,
+            "subdivisionScheme": "none",
+        },
+    )
+    mesh = UsdGeom.Mesh(mesh_prim)
+    mesh.CreateDisplayColorPrimvar(UsdGeom.Tokens.uniform).Set(Vt.Vec3fArray(face_colors))
+    mesh.CreateDoubleSidedAttr(True)
+
 
 COBBLESTONE_ROAD_CFG = terrain_gen.TerrainGeneratorCfg(
     size=(100.0, 100.0), # 生成的平台尺寸，设置为10x10米以提供足够的空间让机器人在上面运动
@@ -89,7 +186,7 @@ class RobotSceneCfg(InteractiveSceneCfg):
         init_state=RigidObjectCfg.InitialStateCfg(
             pos=(0.0, 0.0, PLATFORM_TOP_Z - 0.5 * PLATFORM_THICKNESS),
         ), # 平台初始位置，设置在地面上方 PLATFORM_TOP_Z 米处，减去平台厚度的一半以确保平台顶部在 PLATFORM_TOP_Z 位置
-        spawn=sim_utils.CuboidCfg(
+        spawn=CheckerboardPlatformCfg(
             size=(PLATFORM_SIZE_X, PLATFORM_SIZE_Y, PLATFORM_THICKNESS), # 平台的尺寸，使用之前定义的常量
             rigid_props=sim_utils.RigidBodyPropertiesCfg(
                 kinematic_enabled=True,
@@ -102,7 +199,8 @@ class RobotSceneCfg(InteractiveSceneCfg):
                 static_friction=1.0,
                 dynamic_friction=1.0,
             ),
-            visual_material=sim_utils.PreviewSurfaceCfg(diffuse_color=(0.35, 0.35, 0.4)), # 平台的视觉材质，设置为预览表面并指定颜色，以提供清晰的视觉区分，帮助训练更专注于平台运动的挑战；如果需要更复杂的视觉效果，可以使用 MdlFileCfg。
+            checker_square_size=PLATFORM_CHECKER_SQUARE_SIZE,
+            side_color=(0.35, 0.35, 0.4), # 平台侧面保留深灰色，上表面由无碰撞的黑白棋盘格 mesh 覆盖，方便观察平台运动。
         ),
     )
 
@@ -257,6 +355,7 @@ class EventCfg:
             "asset_cfg": SceneEntityCfg("platform"),
             "lin_frequency_hz": 0.2,
             "max_linear_acc": 0.5,
+            "z_amp_scale": PLATFORM_MOTION_Z_AMP_SCALE,
             # at 4m radius (half platform size), 0.125 rad/s^2 -> 0.5 m/s^2 tangential acceleration
             "max_angular_acc": 0.05,
         },# 这里设置 interval_range_s 为 (0.02, 0.02)，表示每隔 0.02 秒更新一次平台的位置，以提供连续的运动挑战；lin_frequency_hz 设置为 0.2 Hz，表示平台将以 0.2 Hz 的频率进行正弦运动；max_linear_acc 设置为 0.5 m/s^2，表示平台的线性加速度将被限制在这个值，以确保运动的平滑性和可控性；max_angular_acc 设置为 0.125 rad/s^2，表示平台的角加速度将被限制在这个值，以确保旋转运动的平滑性和可控性；如果需要更快或更慢的运动频率，可以调整 lin_frequency_hz；如果需要更强或更弱的运动幅度，可以调整 max_linear_acc 和 max_angular_acc。
@@ -318,21 +417,16 @@ class ObservationsCfg:
         # observation terms (order preserved)
         base_ang_vel = ObsTerm(func=mdp.base_ang_vel, scale=0.2, clip=(-20.0, 20.0), noise=Unoise(n_min=-0.2, n_max=0.2)) # 机器人基座角速度观测，添加噪声以增加训练的鲁棒性；scale 设置为 0.2 以缩放观测值，noise 设置为 Uniform(-0.2, 0.2) 以提供适度的观测噪声，帮助训练更好地适应平台运动的挑战；如果需要更精确或更嘈杂的观测，可以调整 scale 和 noise。
         projected_gravity = ObsTerm(func=mdp.projected_gravity, clip=(-5.0, 5.0), noise=Unoise(n_min=-0.05, n_max=0.05)) # 机器人重力投影观测，添加噪声以增加训练的鲁棒性；noise 设置为 Uniform(-0.05, 0.05) 以提供适度的观测噪声，帮助训练更好地适应平台运动的挑战；如果需要更精确或更嘈杂的观测，可以调整 noise。
-        ekf_base_pos_rel_platform = ObsTerm(
-            func=mdp.ekf_base_pos_rel_platform,
-            clip=(-5.0, 5.0),
-            noise=Unoise(n_min=-0.02, n_max=0.02),
-        ) # EKF 估计的机身相对平台位置观测。
-        ekf_base_vel_rel_platform = ObsTerm(
-            func=mdp.ekf_base_vel_rel_platform,
+        ekf_base_vel_z_rel_platform = ObsTerm(
+            func=mdp.ekf_base_vel_z_rel_platform,
             clip=(-10.0, 10.0),
             noise=Unoise(n_min=-0.05, n_max=0.05),
-        ) # EKF 估计的机身相对平台速度观测。
-        ekf_base_quat_rel_platform = ObsTerm(
-            func=mdp.ekf_base_quat_rel_platform,
+        ) # EKF 估计的机身相对平台 z 速度观测；xy 速度估计不稳，policy 不使用。
+        ekf_base_roll_pitch_rel_platform = ObsTerm(
+            func=mdp.ekf_base_roll_pitch_rel_platform,
             clip=(-1.0, 1.0),
             noise=Unoise(n_min=-0.01, n_max=0.01),
-        ) # EKF 估计的机身相对平台姿态观测。
+        ) # EKF 估计的机身相对平台 roll/pitch；yaw 估计不稳，policy 不使用。
         velocity_commands = ObsTerm(func=mdp.generated_commands, clip=(-5.0, 5.0), params={"command_name": "base_velocity"}) # 机器人当前速度命令观测，直接使用生成的命令作为观测项，以提供清晰的目标信息，帮助训练更好地适应平台运动的挑战；如果需要更复杂的命令表示，可以添加额外的处理或特征提取。
         joint_pos_rel = ObsTerm(func=mdp.joint_pos_rel, clip=(-10.0, 10.0), noise=Unoise(n_min=-0.01, n_max=0.01)) # 机器人关节位置相对观测，添加噪声以增加训练的鲁棒性；noise 设置为 Uniform(-0.01, 0.01) 以提供适度的观测噪声，帮助训练更好地适应平台运动的挑战；如果需要更精确或更嘈杂的观测，可以调整 noise。
         joint_vel_rel = ObsTerm(func=mdp.joint_vel_rel, scale=0.05, clip=(-20.0, 20.0), noise=Unoise(n_min=-1.5, n_max=1.5)) # 机器人关节速度相对观测，添加噪声以增加训练的鲁棒性；scale 设置为 0.05 以缩放观测值，noise 设置为 Uniform(-1.5, 1.5) 以提供较大的观测噪声，帮助训练更好地适应平台运动的挑战；如果需要更精确或更嘈杂的观测，可以调整 scale 和 noise。
@@ -377,14 +471,14 @@ class ObservationsCfg:
                 "platform_asset_cfg": SceneEntityCfg("platform"),
             },
         ) # 特权真值：机身相对平台速度（平台坐标系）。
-        ekf_base_quat_rel_platform = ObsTerm(
-            func=mdp.gt_base_quat_rel_platform,
+        gt_base_rot6d_rel_platform = ObsTerm(
+            func=mdp.gt_base_rot6d_rel_platform,
             clip=(-1.0, 1.0),
             params={
                 "robot_asset_cfg": SceneEntityCfg("robot"),
                 "platform_asset_cfg": SceneEntityCfg("platform"),
             },
-        ) # 特权真值：机身相对平台姿态四元数。
+        ) # 特权真值：机身相对平台姿态 6D 表示（旋转矩阵前两列）。
         projected_gravity = ObsTerm(func=mdp.projected_gravity, clip=(-5.0, 5.0)) # 机器人重力投影观测
         velocity_commands = ObsTerm(func=mdp.generated_commands, clip=(-5.0, 5.0), params={"command_name": "base_velocity"}) # 机器人当前速度命令观测
         joint_pos_rel = ObsTerm(func=mdp.joint_pos_rel, clip=(-10.0, 10.0)) # 机器人关节位置相对观测
@@ -626,7 +720,7 @@ class CurriculumCfg:
     platform_motion_levels = CurrTerm(
         func=mdp.platform_motion_levels,
         params={
-            "motion_mode": "rpy",
+            "motion_mode": "z_rp",
             "dof_upgrade_every_episodes": 140,
             "amp_ramp_episodes": 800,
             "stationary_episodes": 200,
@@ -652,16 +746,18 @@ class CurriculumCfg:
     platform_curriculum_score = CurrTerm(func=mdp.platform_curriculum_score)
     platform_curriculum_score_ema = CurrTerm(func=mdp.platform_curriculum_score_ema)
 
-    # 平台运动幅度课程：根据当前课程级别设置平台加速度峰值和频率。
+    # 仅用于日志：记录当前课程振幅缩放下的 z 方向单边振幅。
     # params.max_linear_acc：平台线加速度上限。
     # params.lin_frequency_hz：使用正弦运动的频率。
+    # params.z_amp_scale：z 方向相对基础线性振幅的缩放系数。
     platform_motion_amplitude = CurrTerm(
         func=mdp.platform_motion_amplitude,
         params={
             "max_linear_acc": 0.5,
             "lin_frequency_hz": 0.2,
+            "z_amp_scale": PLATFORM_MOTION_Z_AMP_SCALE,
         },
-    )# 这里设置 platform_motion_amplitude 的 func 为 mdp.platform_motion_amplitude，表示使用一个基于当前课程级别的函数来设置平台运动的加速度峰值和频率，以提供一个动态调整平台运动挑战的机制；params 中的 max_linear_acc 设置为 0.5 m/s^2，表示平台线加速度的上限；lin_frequency_hz 设置为 0.2 Hz，表示平台运动的频率；如果需要更强或更弱的运动挑战，可以调整 max_linear_acc 和 lin_frequency_hz。
+    )# 这里设置 platform_motion_amplitude 的 func 为 mdp.platform_motion_amplitude，用于日志记录当前 z 方向单边振幅；params 中的 max_linear_acc 设置为 0.5 m/s^2，lin_frequency_hz 设置为 0.2 Hz，z_amp_scale 使用 PLATFORM_MOTION_Z_AMP_SCALE。
 
 
 @configclass

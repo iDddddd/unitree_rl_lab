@@ -76,6 +76,35 @@ def _sanitize_tensor(tensor: torch.Tensor, clip: float | None = None) -> torch.T
     return tensor
 
 
+def _batch_mv(matrix: torch.Tensor, vector: torch.Tensor) -> torch.Tensor:
+    """Batched matrix-vector multiply."""
+    return torch.matmul(matrix, vector.unsqueeze(-1)).squeeze(-1)
+
+
+def _axis_angle_matrix(axis: torch.Tensor, angle: torch.Tensor) -> torch.Tensor:
+    """Build batched rotation matrices for a fixed axis and batched angles."""
+    axis = axis / torch.linalg.norm(axis).clamp_min(1.0e-9)
+    x, y, z = axis[0], axis[1], axis[2]
+    c = torch.cos(angle)
+    s = torch.sin(angle)
+    one_c = 1.0 - c
+    zeros = torch.zeros_like(angle)
+
+    row0 = torch.stack((c + x * x * one_c, x * y * one_c - z * s, x * z * one_c + y * s), dim=-1)
+    row1 = torch.stack((y * x * one_c + z * s, c + y * y * one_c, y * z * one_c - x * s), dim=-1)
+    row2 = torch.stack((z * x * one_c - y * s, z * y * one_c + x * s, c + z * z * one_c), dim=-1)
+    return torch.stack((row0, row1, row2), dim=-2) + zeros[:, None, None] * 0.0
+
+
+def _rpy_matrix(rpy: torch.Tensor, batch: int) -> torch.Tensor:
+    """Build a batched fixed XYZ roll-pitch-yaw rotation matrix."""
+    zeros = torch.zeros(batch, device=rpy.device, dtype=rpy.dtype)
+    rot_x = _axis_angle_matrix(torch.tensor([1.0, 0.0, 0.0], device=rpy.device, dtype=rpy.dtype), zeros + rpy[0])
+    rot_y = _axis_angle_matrix(torch.tensor([0.0, 1.0, 0.0], device=rpy.device, dtype=rpy.dtype), zeros + rpy[1])
+    rot_z = _axis_angle_matrix(torch.tensor([0.0, 0.0, 1.0], device=rpy.device, dtype=rpy.dtype), zeros + rpy[2])
+    return rot_z @ rot_y @ rot_x
+
+
 @dataclass
 class PlatformRelativeEKFOutput:
     """Relative robot-platform state produced by :class:`PlatformRelativeEKF`."""
@@ -85,6 +114,7 @@ class PlatformRelativeEKFOutput:
     base_quat_rel_platform: torch.Tensor
     foot_anchor_pos_platform: torch.Tensor
     foot_pos_rel_platform: torch.Tensor
+    base_vel_rel_platform_kin_z: torch.Tensor
     contact_prob: torch.Tensor
     platform_quat_w_est: torch.Tensor
     platform_ang_vel_w_est: torch.Tensor
@@ -106,8 +136,7 @@ class PlatformRelativeEKF:
     - Platform attitude and inertial inputs are non-privileged and come from the fused foot IMUs.
     - Relative base translation/velocity and the stance anchors are estimated with a linear time-varying
       Kalman filter in the platform frame.
-    - Robot-side foot kinematics are currently proxied from IsaacLab link states. This matches the
-      intended role of encoder/FK/Jacobian terms, but it is still cleaner than using platform truth.
+    - Robot-side foot kinematics are computed from joint states with a URDF-derived FK/Jacobian chain.
     - If both feet are airborne, the filter only propagates and inflates process noise on both anchors.
     """
 
@@ -196,7 +225,7 @@ class PlatformRelativeEKF:
         self._ensure_setup(env)
         env_ids = self._canonical_env_ids(env, env_ids)
 
-        kinematics = self._compute_kinematics_proxy(env_ids)
+        kinematics = self._compute_kinematics_fk(env_ids)
         measured_contact = self._measure_contacts(env_ids)
         self.contact_prob[env_ids] = measured_contact
         self.prev_contact_prob[env_ids] = measured_contact
@@ -274,7 +303,7 @@ class PlatformRelativeEKF:
         )
         self.platform_lin_acc_w[env_ids] = fused["platform_lin_acc_w"]
 
-        kinematics = self._compute_kinematics_proxy(env_ids)
+        kinematics = self._compute_kinematics_fk(env_ids)
         quat_rel = quat_mul(quat_inv(self.platform_quat_w[env_ids]), kinematics["base_quat_w"])
         foot_pos_rel_platform = _batch_quat_apply(quat_rel, kinematics["foot_rel_pos_b"])
         foot_vel_rel_platform = self._compute_contact_point_velocity_platform(quat_rel, kinematics, env_ids)
@@ -391,6 +420,27 @@ class PlatformRelativeEKF:
                 device=env.device,
                 dtype=torch.long,
             )
+            kinematic_joint_names = [
+                "waist_yaw_joint",
+                "waist_roll_joint",
+                "waist_pitch_joint",
+                "left_hip_pitch_joint",
+                "left_hip_roll_joint",
+                "left_hip_yaw_joint",
+                "left_knee_joint",
+                "left_ankle_pitch_joint",
+                "left_ankle_roll_joint",
+                "right_hip_pitch_joint",
+                "right_hip_roll_joint",
+                "right_hip_yaw_joint",
+                "right_knee_joint",
+                "right_ankle_pitch_joint",
+                "right_ankle_roll_joint",
+            ]
+            joint_ids = self._robot.find_joints(kinematic_joint_names, preserve_order=True)[0]
+            self._kinematic_joint_ids = {
+                name: int(joint_id) for name, joint_id in zip(kinematic_joint_names, joint_ids)
+            }
             self._resolved = True
 
         if not self._buffers_ready:
@@ -415,6 +465,166 @@ class PlatformRelativeEKF:
         if env_ids is None:
             return torch.arange(env.num_envs, device=env.device, dtype=torch.long)
         return torch.as_tensor(env_ids, device=env.device, dtype=torch.long)
+
+    def _joint_value(self, joint_tensor: torch.Tensor, name: str) -> torch.Tensor:
+        return joint_tensor[:, self._kinematic_joint_ids[name]]
+
+    def _apply_fixed_transform(
+        self,
+        pos: torch.Tensor,
+        rot: torch.Tensor,
+        lin_vel: torch.Tensor,
+        ang_vel: torch.Tensor,
+        xyz: tuple[float, float, float],
+        rpy: tuple[float, float, float] = (0.0, 0.0, 0.0),
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+        batch = pos.shape[0]
+        xyz_t = torch.tensor(xyz, device=self.device, dtype=self.dtype).expand(batch, 3)
+        offset = _batch_mv(rot, xyz_t)
+        pos = pos + offset
+        lin_vel = lin_vel + torch.cross(ang_vel, offset, dim=-1)
+        if rpy != (0.0, 0.0, 0.0):
+            rpy_t = torch.tensor(rpy, device=self.device, dtype=self.dtype)
+            rot = rot @ _rpy_matrix(rpy_t, batch)
+        return pos, rot, lin_vel, ang_vel
+
+    def _apply_revolute_transform(
+        self,
+        pos: torch.Tensor,
+        rot: torch.Tensor,
+        lin_vel: torch.Tensor,
+        ang_vel: torch.Tensor,
+        axis: tuple[float, float, float],
+        q: torch.Tensor,
+        qd: torch.Tensor,
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+        axis_t = torch.tensor(axis, device=self.device, dtype=self.dtype)
+        axis_b = _batch_mv(rot, axis_t.expand(pos.shape[0], 3))
+        ang_vel = ang_vel + axis_b * qd.unsqueeze(-1)
+        rot = rot @ _axis_angle_matrix(axis_t, q)
+        return pos, rot, lin_vel, ang_vel
+
+    def _apply_urdf_joint(
+        self,
+        pos: torch.Tensor,
+        rot: torch.Tensor,
+        lin_vel: torch.Tensor,
+        ang_vel: torch.Tensor,
+        xyz: tuple[float, float, float],
+        rpy: tuple[float, float, float],
+        axis: tuple[float, float, float],
+        q: torch.Tensor,
+        qd: torch.Tensor,
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+        pos, rot, lin_vel, ang_vel = self._apply_fixed_transform(pos, rot, lin_vel, ang_vel, xyz, rpy)
+        return self._apply_revolute_transform(pos, rot, lin_vel, ang_vel, axis, q, qd)
+
+    def _compute_foot_kinematics_fk(self, env_ids: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+        """Compute ankle-roll link FK and Jacobian velocity relative to the torso frame."""
+        joint_pos = self._robot.data.joint_pos[env_ids]
+        joint_vel = self._robot.data.joint_vel[env_ids]
+        batch = env_ids.numel()
+
+        def q(name: str) -> torch.Tensor:
+            return self._joint_value(joint_pos, name)
+
+        def qd(name: str) -> torch.Tensor:
+            return self._joint_value(joint_vel, name)
+
+        def compute_leg(side: str) -> tuple[torch.Tensor, torch.Tensor]:
+            pos = torch.zeros((batch, 3), device=self.device, dtype=self.dtype)
+            rot = torch.eye(3, device=self.device, dtype=self.dtype).unsqueeze(0).repeat(batch, 1, 1)
+            lin_vel = torch.zeros_like(pos)
+            ang_vel = torch.zeros_like(pos)
+
+            # Inverse torso->pelvis chain from the URDF waist joints:
+            # pelvis --yaw--> waist_yaw --roll + offset--> waist_roll --pitch--> torso.
+            pos, rot, lin_vel, ang_vel = self._apply_revolute_transform(
+                pos, rot, lin_vel, ang_vel, (0.0, 1.0, 0.0), -q("waist_pitch_joint"), -qd("waist_pitch_joint")
+            )
+            pos, rot, lin_vel, ang_vel = self._apply_revolute_transform(
+                pos, rot, lin_vel, ang_vel, (1.0, 0.0, 0.0), -q("waist_roll_joint"), -qd("waist_roll_joint")
+            )
+            pos, rot, lin_vel, ang_vel = self._apply_fixed_transform(
+                pos, rot, lin_vel, ang_vel, (0.0039635, 0.0, -0.044)
+            )
+            pos, rot, lin_vel, ang_vel = self._apply_revolute_transform(
+                pos, rot, lin_vel, ang_vel, (0.0, 0.0, 1.0), -q("waist_yaw_joint"), -qd("waist_yaw_joint")
+            )
+
+            y_sign = 1.0 if side == "left" else -1.0
+            prefix = f"{side}_"
+            pos, rot, lin_vel, ang_vel = self._apply_urdf_joint(
+                pos,
+                rot,
+                lin_vel,
+                ang_vel,
+                (0.0, y_sign * 0.064452, -0.1027),
+                (0.0, 0.0, 0.0),
+                (0.0, 1.0, 0.0),
+                q(prefix + "hip_pitch_joint"),
+                qd(prefix + "hip_pitch_joint"),
+            )
+            pos, rot, lin_vel, ang_vel = self._apply_urdf_joint(
+                pos,
+                rot,
+                lin_vel,
+                ang_vel,
+                (0.0, y_sign * 0.052, -0.030465),
+                (0.0, -0.1749, 0.0),
+                (1.0, 0.0, 0.0),
+                q(prefix + "hip_roll_joint"),
+                qd(prefix + "hip_roll_joint"),
+            )
+            pos, rot, lin_vel, ang_vel = self._apply_urdf_joint(
+                pos,
+                rot,
+                lin_vel,
+                ang_vel,
+                (0.025001, 0.0, -0.12412),
+                (0.0, 0.0, 0.0),
+                (0.0, 0.0, 1.0),
+                q(prefix + "hip_yaw_joint"),
+                qd(prefix + "hip_yaw_joint"),
+            )
+            pos, rot, lin_vel, ang_vel = self._apply_urdf_joint(
+                pos,
+                rot,
+                lin_vel,
+                ang_vel,
+                (-0.078273, y_sign * 0.0021489, -0.17734),
+                (0.0, 0.1749, 0.0),
+                (0.0, 1.0, 0.0),
+                q(prefix + "knee_joint"),
+                qd(prefix + "knee_joint"),
+            )
+            pos, rot, lin_vel, ang_vel = self._apply_urdf_joint(
+                pos,
+                rot,
+                lin_vel,
+                ang_vel,
+                (0.0, -y_sign * 9.4445e-05, -0.30001),
+                (0.0, 0.0, 0.0),
+                (0.0, 1.0, 0.0),
+                q(prefix + "ankle_pitch_joint"),
+                qd(prefix + "ankle_pitch_joint"),
+            )
+            pos, rot, lin_vel, ang_vel = self._apply_urdf_joint(
+                pos,
+                rot,
+                lin_vel,
+                ang_vel,
+                (0.0, 0.0, -0.017558),
+                (0.0, 0.0, 0.0),
+                (1.0, 0.0, 0.0),
+                q(prefix + "ankle_roll_joint"),
+                qd(prefix + "ankle_roll_joint"),
+            )
+            return pos, lin_vel
+
+        left_pos, left_vel = compute_leg("left")
+        right_pos, right_vel = compute_leg("right")
+        return torch.stack((left_pos, right_pos), dim=1), torch.stack((left_vel, right_vel), dim=1)
 
     def _measure_contacts(self, env_ids: torch.Tensor) -> torch.Tensor:
         """Compute per-foot contact probability from normal force fraction.
@@ -496,32 +706,14 @@ class PlatformRelativeEKF:
             "platform_lin_acc_w": fused_lin_acc_w,
         }
 
-    def _compute_kinematics_proxy(self, env_ids: torch.Tensor) -> dict[str, torch.Tensor]:
+    def _compute_kinematics_fk(self, env_ids: torch.Tensor) -> dict[str, torch.Tensor]:
         base_quat_w = self._base_imu.data.quat_w[env_ids]
-        base_pos_w = self._base_imu.data.pos_w[env_ids]
-        base_lin_vel_w = quat_apply(base_quat_w, self._base_imu.data.lin_vel_b[env_ids])
         base_lin_acc_b = self._base_imu.data.lin_acc_b[env_ids]
         base_ang_vel_b = self._base_imu.data.ang_vel_b[env_ids]
-        base_pos_w = _sanitize_tensor(base_pos_w, self.max_abs_position * 5.0)
-        base_lin_vel_w = _sanitize_tensor(base_lin_vel_w, self.max_abs_velocity)
         base_lin_acc_b = _sanitize_tensor(base_lin_acc_b, self.max_abs_acceleration)
         base_ang_vel_b = _sanitize_tensor(base_ang_vel_b, self.max_abs_angular_rate)
 
-        foot_pos_w = self._robot.data.body_pos_w[env_ids][:, self._foot_body_ids]
-        foot_vel_w = self._robot.data.body_lin_vel_w[env_ids][:, self._foot_body_ids]
-        foot_pos_w = _sanitize_tensor(foot_pos_w, self.max_abs_position * 5.0)
-        foot_vel_w = _sanitize_tensor(foot_vel_w, self.max_abs_velocity)
-
-        foot_rel_pos_w = foot_pos_w - base_pos_w[:, None, :]
-        foot_rel_pos_b = _batch_quat_apply_inverse(base_quat_w, foot_rel_pos_w)
-
-        foot_rel_vel_w = foot_vel_w - base_lin_vel_w[:, None, :]
-        foot_rel_vel_b = _batch_quat_apply_inverse(base_quat_w, foot_rel_vel_w)
-        foot_rel_pos_dot_b = foot_rel_vel_b - torch.cross(
-            base_ang_vel_b[:, None, :].expand_as(foot_rel_pos_b),
-            foot_rel_pos_b,
-            dim=-1,
-        )
+        foot_rel_pos_b, foot_rel_pos_dot_b = self._compute_foot_kinematics_fk(env_ids)
         foot_rel_pos_b = _sanitize_tensor(foot_rel_pos_b, self.max_abs_position)
         foot_rel_pos_dot_b = _sanitize_tensor(foot_rel_pos_dot_b, self.max_abs_velocity)
 
@@ -692,10 +884,20 @@ class PlatformRelativeEKF:
         if quat_rel is None:
             quat_rel = quat_mul(quat_inv(self.platform_quat_w[env_ids]), self._base_imu.data.quat_w[env_ids])
 
-        kinematics = self._compute_kinematics_proxy(env_ids)
+        kinematics = self._compute_kinematics_fk(env_ids)
         quat_rel = _sanitize_tensor(quat_rel)
         foot_pos_rel_platform = self.x[env_ids, None, 0:3] + _batch_quat_apply(quat_rel, kinematics["foot_rel_pos_b"])
         foot_pos_rel_platform = _sanitize_tensor(foot_pos_rel_platform, self.max_abs_position)
+        foot_vel_rel_platform = self._compute_contact_point_velocity_platform(quat_rel, kinematics, env_ids)
+        contact_prob = torch.clamp(_sanitize_tensor(self.contact_prob[env_ids]), 0.0, 1.0)
+        stance_mask = contact_prob > self.stance_probability_threshold
+        stance_count = torch.sum(stance_mask.to(self.dtype), dim=-1)
+        base_vel_kin_z_sum = torch.sum(torch.where(stance_mask, -foot_vel_rel_platform[..., 2], 0.0), dim=-1)
+        base_vel_kin_z = torch.where(
+            stance_count > 0.0,
+            base_vel_kin_z_sum / torch.clamp(stance_count, min=1.0),
+            torch.full_like(stance_count, float("nan")),
+        )
 
         vel_out = (
             self.smoothed_vel_output[env_ids]
@@ -714,7 +916,8 @@ class PlatformRelativeEKF:
                 self.x[env_ids, 6:].reshape(-1, self.num_feet, 3), self.max_abs_position
             ),
             foot_pos_rel_platform=foot_pos_rel_platform,
-            contact_prob=torch.clamp(_sanitize_tensor(self.contact_prob[env_ids]), 0.0, 1.0),
+            base_vel_rel_platform_kin_z=base_vel_kin_z,
+            contact_prob=contact_prob,
             platform_quat_w_est=self.platform_quat_w[env_ids],
             platform_ang_vel_w_est=_sanitize_tensor(self.platform_ang_vel_w[env_ids], self.max_abs_angular_rate),
             platform_lin_acc_w_est=_sanitize_tensor(self.platform_lin_acc_w[env_ids], self.max_abs_acceleration),
