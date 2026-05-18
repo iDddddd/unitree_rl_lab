@@ -766,6 +766,7 @@ class RobotEnvCfg(ManagerBasedRLEnvCfg):
 
     ekf_debug_vis: bool = False
     ekf_debug_env_id: int = 0
+    ekf_use_vertical_accel_prediction: bool = False
 
     # Scene settings - 包含环境数量、间距等。
     scene: RobotSceneCfg = RobotSceneCfg(num_envs=4096, env_spacing=12.0)

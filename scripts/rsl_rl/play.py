@@ -153,12 +153,14 @@ class EkfRealtimePlotter:
             self._lines[f"quat_true_{i}"] = line_quat_true
 
         for i in self._vel_indices:
+            (line_vel_est,) = axes[1].plot([], [], color=colors[i], linestyle="-", label=f"vel est {labels[i]}")
             (line_vel_true,) = axes[1].plot([], [], color=colors[i], linestyle="--", label=f"vel true {labels[i]}")
+            self._lines[f"vel_est_{i}"] = line_vel_est
             self._lines[f"vel_true_{i}"] = line_vel_true
         (line_vel_kin_z,) = axes[1].plot([], [], color="tab:orange", linestyle=":", label="vel kin z")
         self._lines["vel_kin_z"] = line_vel_kin_z
 
-        (line_vel_err,) = axes[2].plot([], [], color="tab:purple", label="vel z error")
+        (line_vel_err,) = axes[2].plot([], [], color="tab:purple", label="vel true z - est z")
         (line_quat_err,) = axes[2].plot([], [], color="tab:brown", label="roll/pitch error rad")
         self._lines["vel_err"] = line_vel_err
         self._lines["quat_err"] = line_quat_err
@@ -206,7 +208,8 @@ class EkfRealtimePlotter:
             self._history["vel_true"][i].append(float(panel_data["base_vel_rel_truth"][i]))
 
         self._history["vel_kin_z"].append(float(panel_data.get("base_vel_rel_kin_z", float("nan"))))
-        self._history["vel_err"].append(float(panel_data["base_vel_rel_error"]))
+        vel_z_error = float(panel_data["base_vel_rel_truth"][2]) - float(panel_data["base_vel_rel_est"][2])
+        self._history["vel_err"].append(vel_z_error)
         self._history["quat_err"].append(float(panel_data["base_quat_rel_error_rad"]))
         contact_prob = torch.as_tensor(panel_data.get("foot_contact_prob", [float("nan"), float("nan")]))
         left_prob = float(contact_prob[0]) if contact_prob.numel() > 0 else float("nan")
@@ -223,6 +226,7 @@ class EkfRealtimePlotter:
             self._lines[f"quat_est_{i}"].set_data(t, list(self._history["quat_est"][i]))
             self._lines[f"quat_true_{i}"].set_data(t, list(self._history["quat_true"][i]))
         for i in self._vel_indices:
+            self._lines[f"vel_est_{i}"].set_data(t, list(self._history["vel_est"][i]))
             self._lines[f"vel_true_{i}"].set_data(t, list(self._history["vel_true"][i]))
 
         self._lines["vel_err"].set_data(t, list(self._history["vel_err"]))

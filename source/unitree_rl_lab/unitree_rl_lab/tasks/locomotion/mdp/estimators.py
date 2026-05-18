@@ -111,6 +111,8 @@ class PlatformRelativeEKFOutput:
 
     base_pos_rel_platform: torch.Tensor
     base_vel_rel_platform: torch.Tensor
+    base_vel_rel_platform_raw: torch.Tensor
+    rel_acc_platform: torch.Tensor
     base_quat_rel_platform: torch.Tensor
     foot_anchor_pos_platform: torch.Tensor
     foot_pos_rel_platform: torch.Tensor
@@ -178,6 +180,7 @@ class PlatformRelativeEKF:
         vel_output_smoothing: float = 0.3,
         innovation_clip: float = 1.0,
         touchdown_impact_damping: float = 0.15,
+        use_vertical_accel_prediction: bool = False,
         dt: float | None = None,
     ):
         self.robot_name = robot_name
@@ -216,6 +219,7 @@ class PlatformRelativeEKF:
         self.vel_output_smoothing = vel_output_smoothing
         self.innovation_clip = innovation_clip
         self.touchdown_impact_damping = touchdown_impact_damping
+        self.use_vertical_accel_prediction = use_vertical_accel_prediction
         self.dt = dt
 
         self._resolved = False
@@ -250,6 +254,7 @@ class PlatformRelativeEKF:
         self.x[env_ids, 3:6] = base_vel_rel_platform
         self.x[env_ids, 6:] = foot_anchor_pos_platform.reshape(-1, 6)
         self.x[env_ids] = self._sanitize_state(self.x[env_ids])
+        self.last_rel_acc_platform[env_ids] = 0.0
 
         eye = torch.eye(self.state_dim, device=self.device, dtype=self.dtype)
         self.P[env_ids] = eye.unsqueeze(0) * self.init_covariance
@@ -339,6 +344,10 @@ class PlatformRelativeEKF:
         # ang_acc from IMU finite-differencing is too noisy and was the main source of
         # velocity estimation spikes. Its effect is absorbed by the increased process_noise_rel_vel.
         rel_acc_platform = _sanitize_tensor(rel_acc_platform, self.max_abs_acceleration)
+        self.last_rel_acc_platform[env_ids] = rel_acc_platform
+        if not self.use_vertical_accel_prediction:
+            rel_acc_platform = rel_acc_platform.clone()
+            rel_acc_platform[:, 2] = 0.0
 
         xbar[:, 0:3] = rel_pos + dt * rel_vel + 0.5 * dt * dt * rel_acc_platform
         xbar[:, 3:6] = rel_vel + dt * rel_acc_platform
@@ -459,6 +468,7 @@ class PlatformRelativeEKF:
             self.is_initialized = torch.zeros(env.num_envs, device=self.device, dtype=torch.bool)
             self.smoothed_vel_output = torch.zeros((env.num_envs, 3), device=self.device, dtype=self.dtype)
             self.fusion_weights = torch.zeros((env.num_envs, self.num_feet), device=self.device, dtype=self.dtype)
+            self.last_rel_acc_platform = torch.zeros((env.num_envs, 3), device=self.device, dtype=self.dtype)
             self._buffers_ready = True
 
     def _canonical_env_ids(self, env: ManagerBasedRLEnv, env_ids: torch.Tensor | None) -> torch.Tensor:
@@ -911,6 +921,8 @@ class PlatformRelativeEKF:
         return PlatformRelativeEKFOutput(
             base_pos_rel_platform=_sanitize_tensor(self.x[env_ids, 0:3], self.max_abs_position),
             base_vel_rel_platform=_sanitize_tensor(vel_out, self.max_abs_velocity),
+            base_vel_rel_platform_raw=_sanitize_tensor(self.x[env_ids, 3:6], self.max_abs_velocity),
+            rel_acc_platform=_sanitize_tensor(self.last_rel_acc_platform[env_ids], self.max_abs_acceleration),
             base_quat_rel_platform=quat_rel,
             foot_anchor_pos_platform=_sanitize_tensor(
                 self.x[env_ids, 6:].reshape(-1, self.num_feet, 3), self.max_abs_position

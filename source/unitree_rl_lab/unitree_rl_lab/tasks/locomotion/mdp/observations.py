@@ -108,7 +108,9 @@ def _get_platform_relative_ekf_output(env: ManagerBasedRLEnv) -> PlatformRelativ
     cache = getattr(env, "_platform_relative_ekf_cache", None)
     if cache is None:
         cache = {
-            "estimator": PlatformRelativeEKF(),
+            "estimator": PlatformRelativeEKF(
+                use_vertical_accel_prediction=getattr(env.cfg, "ekf_use_vertical_accel_prediction", False)
+            ),
             "last_step": None,
             "output": None,
             "debug_origin_offset": torch.zeros((env.num_envs, 3), device=env.device),
