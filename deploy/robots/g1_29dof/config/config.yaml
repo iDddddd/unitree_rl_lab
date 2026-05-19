@@ -7,6 +7,9 @@ FSM:
     Velocity:
       id: 3
       type: RLBase
+    PlatformVelocity:
+      id: 4
+      type: RLBase
 
     Mimic_Dance_102: # uncomment to enable
       id: 101
@@ -36,6 +39,7 @@ FSM:
     transitions: 
       Passive: LT + B.on_pressed
       Velocity: RB + X.on_pressed
+      PlatformVelocity: RB + Y.on_pressed
     kp: [
       100., 100., 100., 150., 40., 40.,
       100., 100., 100., 150., 40., 40.,
@@ -68,6 +72,10 @@ FSM:
 
     policy_dir: config/policy/velocity
     # policy_dir: ../../../logs/rsl_rl/unitree_g1_29dof_velocity
+  PlatformVelocity:
+    transitions:
+      Passive: LT + B.on_pressed
+    policy_dir: config/policy/platform_velocity
   Mimic_Dance_102:
     transitions: 
       Passive: LT + B.on_pressed

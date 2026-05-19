@@ -10,6 +10,7 @@
 #include "isaaclab/assets/articulation/articulation.h"
 #include "isaaclab/algorithms/algorithms.h"
 #include <iostream>
+#include <functional>
 #include "isaaclab/utils/utils.h"
 
 namespace isaaclab
@@ -17,6 +18,15 @@ namespace isaaclab
 
 class ObservationManager;
 class ActionManager;
+
+/// Lightweight output struct populated by the optional EKF hook.
+/// Observations that reference EKF quantities read from this struct.
+struct PlatformEKFOutput
+{
+    float base_vel_z_rel_platform    = 0.0f;
+    float base_roll_rel_platform     = 0.0f;
+    float base_pitch_rel_platform    = 0.0f;
+};
 
 class ManagerBasedRLEnv
 {
@@ -52,6 +62,7 @@ public:
         global_phase = 0;
         episode_length = 0;
         robot->update();
+        if (ekf_reset_hook) ekf_reset_hook();
         action_manager->reset();
         observation_manager->reset();
     }
@@ -60,6 +71,7 @@ public:
     {
         episode_length += 1;
         robot->update();
+        if (ekf_step_hook) ekf_step_hook();
         auto obs = observation_manager->compute();
         auto action = alg->act(obs);
         action_manager->process_action(action);
@@ -75,6 +87,15 @@ public:
     std::unique_ptr<Algorithms> alg;
     long episode_length = 0;
     float global_phase = 0.0f;
+
+    /// EKF output readable by observation functions.
+    PlatformEKFOutput ekf_output;
+
+    /// Optional hooks set by robot-specific code to drive the platform EKF.
+    /// ekf_reset_hook – called once on env reset (before obs manager reset)
+    /// ekf_step_hook  – called each control step (before observation compute)
+    std::function<void()> ekf_reset_hook;
+    std::function<void()> ekf_step_hook;
 };
 
 };

@@ -136,5 +136,21 @@ REGISTER_OBSERVATION(gait_phase)
     return obs;
 }
 
+/// EKF: vertical velocity of the base relative to the platform (z-axis, body frame).
+/// Requires ekf_step_hook / ekf_reset_hook to be set in the robot-specific state.
+REGISTER_OBSERVATION(ekf_base_vel_z_rel_platform)
+{
+    return std::vector<float>{env->ekf_output.base_vel_z_rel_platform};
+}
+
+/// EKF: roll and pitch of the base relative to the platform.
+REGISTER_OBSERVATION(ekf_base_roll_pitch_rel_platform)
+{
+    return std::vector<float>{
+        env->ekf_output.base_roll_rel_platform,
+        env->ekf_output.base_pitch_rel_platform
+    };
+}
+
 }
 }

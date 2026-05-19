@@ -11,6 +11,20 @@ namespace isaaclab
 
 class MotionLoader;
 
+// Foot IMU data received from DDS (rt/lf/foot_imu_0 / rt/lf/foot_imu_1).
+// On the sim side the bridge packs contact normal force into temperature * 100.
+struct FootImuState
+{
+    // World-frame orientation quaternion: [w, x, y, z]
+    Eigen::Quaternionf quat_w       = Eigen::Quaternionf::Identity();
+    // Body-frame angular velocity (rad/s)
+    Eigen::Vector3f    ang_vel_b    = Eigen::Vector3f::Zero();
+    // Body-frame specific force (m/s²), IMU convention (a_true + g)
+    Eigen::Vector3f    lin_acc_b    = Eigen::Vector3f::Zero();
+    // Contact normal force (N), decoded from DDS temperature field / 100.0
+    float              contact_force = 0.0f;
+};
+
 struct ArticulationData
 {
     Eigen::Vector3f GRAVITY_VEC_W = Eigen::Vector3f(0.0f, 0.0f, -1.0f);
@@ -36,9 +50,15 @@ struct ArticulationData
 
     Eigen::Quaternionf root_quat_w;
 
+    // Base linear acceleration in body frame (from base IMU, specific force).
+    Eigen::Vector3f root_lin_acc_b = Eigen::Vector3f::Zero();
+
     std::vector<float> joint_ids_map;
 
     unitree::common::UnitreeJoystick* joystick = nullptr;
+
+    // Foot IMU data: index 0 = left ankle_roll_link, index 1 = right ankle_roll_link
+    FootImuState foot_imu[2];
 };
 
 class Articulation
